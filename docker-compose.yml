@@ -1,6 +1,6 @@
 services:
   fankarr:
-    image: masutayunikon/fankarr:latest
+    image: ghcr.io/kyben20/fankarr-v2:latest
     container_name: fankarr
     environment:
       - PUID=1000        # UID de votre utilisateur (id -u)
