@@ -97,6 +97,117 @@ async function rdtLogin(config: ClientConfig): Promise<string> {
     return cookie
 }
 
+/**
+ * Échappement d'une chaîne pour utilisation dans une expression régulière C# .NET.
+ */
+function escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Construit une regex case-insensitive compatible C# pour cibler un fichier précis.
+ */
+function makeIncludeRegex(fileName: string): string {
+    return `(?i)${escapeRegex(fileName)}`
+}
+
+/**
+ * Analyse succincte d'un fichier .torrent bencodé pour extraire le nom du fichier à l'index donné.
+ */
+function extractTorrentFileName(buffer: ArrayBuffer, targetIndex: number): string | null {
+    try {
+        const bytes = new Uint8Array(buffer)
+        let pos = 0
+        const decoder = new TextDecoder('utf-8', { fatal: false })
+
+        function parse(): any {
+            if (pos >= bytes.length) return null
+            const b = bytes[pos]
+            if (b === 0x69) { // 'i'
+                pos++
+                const end = bytes.indexOf(0x65, pos)
+                if (end === -1) return null
+                const n = parseInt(decoder.decode(bytes.subarray(pos, end)), 10)
+                pos = end + 1
+                return n
+            }
+            if (b === 0x6c) { // 'l'
+                pos++
+                const list: any[] = []
+                while (pos < bytes.length && bytes[pos] !== 0x65) {
+                    list.push(parse())
+                }
+                pos++
+                return list
+            }
+            if (b === 0x64) { // 'd'
+                pos++
+                const dict: Record<string, any> = {}
+                while (pos < bytes.length && bytes[pos] !== 0x65) {
+                    const k = parse()
+                    const v = parse()
+                    if (typeof k === 'string') dict[k] = v
+                }
+                pos++
+                return dict
+            }
+            if (b >= 0x30 && b <= 0x39) { // '0'-'9'
+                const colon = bytes.indexOf(0x3a, pos)
+                if (colon === -1) return null
+                const len = parseInt(decoder.decode(bytes.subarray(pos, colon)), 10)
+                pos = colon + 1
+                const strBytes = bytes.subarray(pos, pos + len)
+                pos += len
+                return decoder.decode(strBytes)
+            }
+            return null
+        }
+
+        const torrent = parse()
+        const info = torrent?.info
+        if (!info) return null
+
+        if (Array.isArray(info.files)) {
+            const fileEntry = info.files[targetIndex]
+            if (fileEntry) {
+                if (Array.isArray(fileEntry.path)) {
+                    return fileEntry.path[fileEntry.path.length - 1] || null
+                }
+                if (typeof fileEntry.path === 'string') {
+                    return fileEntry.path.split(/[\\/]/).pop() || null
+                }
+            }
+        } else if (typeof info.name === 'string' && targetIndex === 0) {
+            return info.name
+        }
+        return null
+    } catch {
+        return null
+    }
+}
+
+/**
+ * Récupère les paramètres de RDT-Client via son API native GET /Api/Settings.
+ */
+async function rdtGetSettings(config: ClientConfig, authHeaders: Record<string, string>): Promise<Record<string, any>> {
+    try {
+        const res = await clientFetch(config, `${config.url}/Api/Settings`, { headers: authHeaders })
+        if (!res.ok) return {}
+        const list: any[] = await res.json()
+        const map: Record<string, any> = {}
+        if (Array.isArray(list)) {
+            for (const item of list) {
+                const k = item.Key ?? item.key
+                const v = item.Value ?? item.value
+                if (k) map[k] = v
+            }
+        }
+        return map
+    } catch {
+        return {}
+    }
+}
+
 async function rdtTorrentExists(config: ClientConfig, authHeaders: Record<string, string>, hash: string): Promise<boolean> {
     try {
         const res = await clientFetch(config, `${config.url}/api/v2/torrents/info?hashes=${hash}`, {
@@ -270,37 +381,104 @@ const RDTClient: TorrentClientDriver = {
             }
 
             const isMagnet = url.startsWith('magnet:')
-            let res: Response
+            let torrentBytes: ArrayBuffer | null = null
 
-            if (isMagnet) {
-                const params = new URLSearchParams()
-                params.set('urls', url)
-                if (config.category) params.set('category', String(config.category))
-                if (config.savePath)  params.set('savepath', String(config.savePath))
-                res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                    method : 'POST',
-                    body   : params,
-                    headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-                })
-            } else {
+            if (!isMagnet) {
                 logger.debug('rdtclient', `Téléchargement du fichier .torrent par FanKarr : ${url.slice(0, 120)}`)
                 const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
                 if (!torrentRes.ok) throw new Error(`Impossible de télécharger le fichier .torrent (HTTP ${torrentRes.status}) : ${url}`)
-                const torrentBytes = await torrentRes.arrayBuffer()
-                const form = new FormData()
-                if (config.category) form.append('category', String(config.category))
-                if (config.savePath)  form.append('savepath', String(config.savePath))
-                form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
-                res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
+                torrentBytes = await torrentRes.arrayBuffer()
             }
 
-            const text = await res.text()
-            if (!isRdtAddSuccess(res, text)) {
-                throw new Error(`RDT-Client a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
+            // Détermination du nom de fichier exact ciblé
+            const targetFileName = (options.file_path || '').split(/[\\/]/).pop()
+                || (torrentBytes ? extractTorrentFileName(torrentBytes, options.file_index) : null)
+
+            const includeRegex = targetFileName ? makeIncludeRegex(targetFileName) : null
+
+            let uploadSuccess = false
+
+            // Tentative 1 : Upload via l'API native RDT-Client avec includeRegex pour que Real-Debrid
+            // ne sélectionne et ne télécharge QUE ce fichier précis du pack.
+            if (includeRegex) {
+                try {
+                    const settings = await rdtGetSettings(config, authH)
+                    const torrentPayload: Record<string, any> = {
+                        category            : config.category ?? 'fankai',
+                        downloadClient      : settings['DownloadClient:Client'] ?? 0,
+                        hostDownloadAction  : settings['Integrations:Default:HostDownloadAction'] ?? 0,
+                        downloadAction      : (settings['Integrations:Default:OnlyDownloadAvailableFiles'] ?? false) ? 1 : 0,
+                        downloadMinSize     : settings['Integrations:Default:MinFileSize'] ?? 0,
+                        torrentRetryAttempts: settings['Integrations:Default:TorrentRetryAttempts'] ?? 1,
+                        downloadRetryAttempts: settings['Integrations:Default:DownloadRetryAttempts'] ?? 3,
+                        deleteOnError       : settings['Integrations:Default:DeleteOnError'] ?? 0,
+                        lifetime            : settings['Integrations:Default:TorrentLifetime'] ?? 0,
+                        includeRegex        : includeRegex,
+                    }
+
+                    let nativeRes: Response
+                    if (isMagnet) {
+                        nativeRes = await clientFetch(config, `${config.url}/Api/Torrents/UploadMagnet`, {
+                            method : 'POST',
+                            headers: { ...authH, 'Content-Type': 'application/json' },
+                            body   : JSON.stringify({ magnetLink: url, torrent: torrentPayload }),
+                        })
+                    } else if (torrentBytes) {
+                        const form = new FormData()
+                        form.append('file', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
+                        form.append('formData', JSON.stringify({ torrent: torrentPayload }))
+                        nativeRes = await clientFetch(config, `${config.url}/Api/Torrents/UploadFile`, {
+                            method : 'POST',
+                            body   : form,
+                            headers: authH,
+                        })
+                    } else {
+                        throw new Error('Données du torrent indisponibles')
+                    }
+
+                    if (nativeRes.ok) {
+                        uploadSuccess = true
+                        logger.info('rdtclient', `Torrent envoyé à RDT-Client avec sélection stricte du fichier « ${targetFileName} » (includeRegex)`)
+                    } else {
+                        const errTxt = await nativeRes.text().catch(() => '')
+                        logger.debug('rdtclient', `API native RDT-Client HTTP ${nativeRes.status} (${errTxt}), repli sur qBittorrent add`)
+                    }
+                } catch (nativeErr) {
+                    logger.debug('rdtclient', `Erreur API native RDT-Client : ${nativeErr instanceof Error ? nativeErr.message : nativeErr}`)
+                }
+            }
+
+            // Tentative 2 (repli) : Émulation qBittorrent classique (/api/v2/torrents/add)
+            if (!uploadSuccess) {
+                let res: Response
+                if (isMagnet) {
+                    const params = new URLSearchParams()
+                    params.set('urls', url)
+                    if (config.category) params.set('category', String(config.category))
+                    if (config.savePath)  params.set('savepath', String(config.savePath))
+                    res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                        method : 'POST',
+                        body   : params,
+                        headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+                    })
+                } else if (torrentBytes) {
+                    const form = new FormData()
+                    if (config.category) form.append('category', String(config.category))
+                    if (config.savePath)  form.append('savepath', String(config.savePath))
+                    form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
+                    res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
+                } else {
+                    throw new Error('Données du torrent indisponibles')
+                }
+
+                const text = await res.text()
+                if (!isRdtAddSuccess(res, text)) {
+                    throw new Error(`RDT-Client a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
+                }
             }
 
             if (hash) {
-                logger.info('rdtclient', `Torrent ajouté, fichier n° ${options.file_index} sélectionné dès réception des métadonnées`)
+                logger.info('rdtclient', `Torrent ajouté, fichier n° ${options.file_index} configuré`)
                 rdtApplyFilePriority(config, hash, options.file_index).catch(err =>
                     logger.warn('rdtclient', `Priorité de fichier non appliquée : ${err instanceof Error ? err.message : err}`)
                 )
