@@ -241,22 +241,6 @@ const RDTClient: TorrentClientDriver = {
         })
     },
 
-    async getFiles(config, hash) {
-        const authH = await rdtAuth(config)
-        const res = await clientFetch(config, `${config.url}/api/v2/torrents/files?hash=${hash}`, {
-            headers: authH,
-        })
-        if (!res.ok) return []
-        const data: any[] = await res.json()
-        if (!Array.isArray(data)) return []
-        return data.map((f: any, i: number) => ({
-            index   : i,
-            name    : String(f.name ?? ''),
-            progress: f.progress ?? 0,
-            priority: f.priority ?? 1,
-        }))
-    },
-
     async add(config, url, options?: DownloadOptions) {
         const authH = await rdtAuth(config)
 

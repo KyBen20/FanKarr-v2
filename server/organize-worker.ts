@@ -382,11 +382,17 @@ async function organizeTorrent(
         const candidates = filePath ? [
             path.join(savePath, filePath),
             path.join(completePath, filePath),
+            path.join(savePath, name, filePath),
+            path.join(completePath, name, filePath),
             path.join(savePath, filename),
             path.join(completePath, filename),
+            path.join(savePath, name, filename),
+            path.join(completePath, name, filename),
         ] : [
             path.join(savePath, filename),
             path.join(completePath, filename),
+            path.join(savePath, name, filename),
+            path.join(completePath, name, filename),
         ]
 
         let src: string | null = null
@@ -448,8 +454,12 @@ async function organizeTorrent(
         const candidates = [
             path.join(savePath, fullPath),
             path.join(completePath, fullPath),
+            path.join(savePath, name, fullPath),
+            path.join(completePath, name, fullPath),
             path.join(savePath, filename),
             path.join(completePath, filename),
+            path.join(savePath, name, filename),
+            path.join(completePath, name, filename),
         ]
         let src: string | null = null
         for (const c of candidates) { if (fs.existsSync(c)) { src = c; break } }
@@ -562,20 +572,21 @@ parentPort?.on('message', async (msg: any) => {
         }
 
         try {
-            // Fichiers terminés (nom seul) ; null si le client ne donne pas les noms
+            // Fichiers terminés (nom seul) ; null si le client ne donne pas les noms ou ne gère pas la progression
             let completedFileNames: Set<string> | null = null
             if (Array.isArray(t.files) && t.files.length > 0) {
                 const hasNames = t.files.some((f: any) => f.name && String(f.name).trim())
                 if (hasNames) {
-                    completedFileNames = new Set(
-                        t.files
-                            .filter((f: any) => (f.progress ?? 0) >= 1 && f.name && String(f.name).trim())
-                            .map((f: any) => {
-                                const parts = String(f.name).replace(/\\/g, '/').split('/')
-                                return (parts[parts.length - 1] ?? '').toLowerCase()
-                            })
-                            .filter(Boolean)
-                    )
+                    const completed = t.files
+                        .filter((f: any) => (f.progress ?? 0) >= 1 && f.name && String(f.name).trim())
+                        .map((f: any) => {
+                            const parts = String(f.name).replace(/\\/g, '/').split('/')
+                            return (parts[parts.length - 1] ?? '').toLowerCase()
+                        })
+                        .filter(Boolean)
+                    if (completed.length > 0) {
+                        completedFileNames = new Set(completed)
+                    }
                 }
             }
 
