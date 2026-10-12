@@ -180,7 +180,7 @@ const clientMatrix = [
   },
   {
     id: 'rdtclient',    label: 'RDT-Client',               version: 'Émulation qBittorrent',
-    auth: "Nom d'utilisateur et mot de passe", fileSelect: true,  fileProgress: true,  torrentUpload: 'proxy', categories: true,  deleteFiles: true,
+    auth: "Nom d'utilisateur et mot de passe", fileSelect: true,  fileProgress: false, torrentUpload: 'proxy', categories: true,  deleteFiles: true,
   },
 ]
 

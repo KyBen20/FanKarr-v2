@@ -216,21 +216,7 @@ const RDTClient: TorrentClientDriver = {
         if (!res.ok) throw new Error(`Liste des torrents inaccessible (HTTP ${res.status})`)
         const data: any[] = await res.json()
 
-        const fileMap = new Map<string, any[]>()
-        await Promise.all(data.map(async (t: any) => {
-            try {
-                const r = await clientFetch(config, `${config.url}/api/v2/torrents/files?hash=${t.hash}`, {
-                    headers: authH,
-                })
-                if (r.ok) {
-                    const files = await r.json()
-                    if (Array.isArray(files)) fileMap.set(t.hash, files)
-                }
-            } catch {}
-        }))
-
         return data.map(t => {
-            const fileInfo = fileMap.get(t.hash) ?? []
             const progressVal = typeof t.progress === 'number' ? Math.round(t.progress * 100) : 0
             return {
                 hash      : t.hash,
@@ -246,14 +232,11 @@ const RDTClient: TorrentClientDriver = {
                 eta       : t.eta ?? -1,
                 save_path : t.save_path ?? '',
                 category  : t.category ?? '',
-                files     : fileInfo.length > 0
-                    ? fileInfo.map((f: any, i: number) => ({
-                        index   : i,
-                        name    : String(f.name ?? ''),
-                        progress: f.progress ?? 0,   // 0–1
-                        priority: f.priority ?? 1,
-                    }))
-                    : undefined,
+                // RDT-Client ne gère pas de progression granulaire par fichier fiable via son API d'émulation.
+                // Laisser files undefined permet au worker d'organisation de vérifier directement la présence
+                // des fichiers sur le disque (comme pour Deluge, uTorrent, Synology) et évite d'ignorer
+                // à tort les épisodes téléchargés.
+                files     : undefined,
             } satisfies TorrentInfo
         })
     },
