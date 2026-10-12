@@ -377,11 +377,160 @@ function resolveSourceFile(candidate: string, targetFilename?: string): string |
     return null
 }
 
+function normalizeForComparison(str: string): string {
+    return str
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[\u2026]/g, '...')
+        .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+        .replace(/[._\-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .toLowerCase()
+        .trim()
+}
+
+function isFilenameMatch(candidateFilename: string, targetFilename: string): boolean {
+    const cLower = candidateFilename.toLowerCase().trim()
+    const tLower = targetFilename.toLowerCase().trim()
+    if (cLower === tLower) return true
+
+    const cNfc = candidateFilename.normalize('NFC').toLowerCase().trim()
+    const tNfc = targetFilename.normalize('NFC').toLowerCase().trim()
+    if (cNfc === tNfc) return true
+
+    const cNorm = normalizeForComparison(candidateFilename)
+    const tNorm = normalizeForComparison(targetFilename)
+    if (cNorm === tNorm) return true
+
+    const cExt = path.extname(candidateFilename).toLowerCase()
+    const tExt = path.extname(targetFilename).toLowerCase()
+    if (VIDEO_EXTENSIONS.has(cExt) && (VIDEO_EXTENSIONS.has(tExt) || !tExt)) {
+        const cBaseNorm = normalizeForComparison(path.parse(candidateFilename).name)
+        const tBaseNorm = normalizeForComparison(path.parse(targetFilename).name)
+        if (cBaseNorm === tBaseNorm) return true
+    }
+
+    return false
+}
+
+function getCandidateSearchDirs(savePath: string, name?: string, completePath?: string): string[] {
+    const searchDirs: string[] = []
+    const addDir = (d?: string | null) => {
+        if (!d) return
+        try {
+            const resolved = path.resolve(d)
+            if (!searchDirs.includes(resolved) && fs.existsSync(resolved)) {
+                searchDirs.push(resolved)
+            }
+        } catch {}
+    }
+
+    // 1. Dossier savePath du torrent
+    addDir(savePath)
+    if (name) addDir(path.join(savePath, name))
+
+    // 2. Dossier parent de savePath (ex. /media/downloads/fankai si savePath est /media/downloads/fankai/One Piece Kaï)
+    const parentSave = path.dirname(savePath)
+    addDir(parentSave)
+    if (name) {
+        addDir(path.join(parentSave, name))
+
+        // Dossiers avec variation de nom dans le parent (ex. "One Piece Kai" sans tréma)
+        try {
+            if (fs.existsSync(parentSave)) {
+                const normTarget = normalizeForComparison(name)
+                const entries = fs.readdirSync(parentSave, { withFileTypes: true })
+                for (const e of entries) {
+                    if (e.isDirectory() && normalizeForComparison(e.name) === normTarget) {
+                        addDir(path.join(parentSave, e.name))
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    // 3. completePath si configuré
+    if (completePath && completePath !== savePath) {
+        addDir(completePath)
+        if (name) addDir(path.join(completePath, name))
+        const parentComplete = path.dirname(completePath)
+        addDir(parentComplete)
+        if (name) addDir(path.join(parentComplete, name))
+    }
+
+    return searchDirs
+}
+
+function findSourceFileWithFallback(
+    filename: string,
+    candidates: string[],
+    searchDirs: string[],
+    fileCache?: Map<string, string[]>,
+): string | null {
+    // 1. Essai direct sur les chemins candidats exacts
+    for (const c of candidates) {
+        const resolved = resolveSourceFile(c, filename)
+        if (resolved) return resolved
+    }
+
+    // 2. Recherche récursive (avec mise en cache par dossier racine)
+    for (const root of searchDirs) {
+        if (!root) continue
+
+        let files: string[]
+        if (fileCache && fileCache.has(root)) {
+            files = fileCache.get(root)!
+        } else {
+            files = []
+            const walk = (dir: string, depth: number) => {
+                if (depth > 4) return
+                try {
+                    const entries = fs.readdirSync(dir, { withFileTypes: true })
+                    for (const entry of entries) {
+                        const full = path.join(dir, entry.name)
+                        if (entry.isFile()) {
+                            const ext = path.extname(entry.name).toLowerCase()
+                            if (VIDEO_EXTENSIONS.has(ext)) {
+                                files.push(full)
+                            }
+                        } else if (entry.isDirectory()) {
+                            const dName = entry.name.toLowerCase()
+                            if (!dName.startsWith('.') && !EXCLUDED_FOLDERS.has(dName)) {
+                                walk(full, depth + 1)
+                            }
+                        }
+                    }
+                } catch {}
+            }
+            walk(root, 0)
+            if (fileCache) fileCache.set(root, files)
+        }
+
+        for (let i = 0; i < files.length; i++) {
+            const fPath = files[i]
+            const base = path.basename(fPath)
+            if (isFilenameMatch(base, filename)) {
+                if (fs.existsSync(fPath)) {
+                    return fPath
+                } else {
+                    files.splice(i, 1)
+                    i--
+                }
+            }
+        }
+    }
+
+    return null
+}
+
 function cleanEmptyParentDir(filePath: string, stopAtDir?: string): void {
     try {
         let parent = path.dirname(filePath)
         const stop = stopAtDir ? path.resolve(stopAtDir).toLowerCase() : ''
-        while (parent && (!stop || path.resolve(parent).toLowerCase() !== stop)) {
+        const parentStop = stopAtDir ? path.resolve(path.dirname(stopAtDir)).toLowerCase() : ''
+        while (parent) {
+            const resolvedParent = path.resolve(parent).toLowerCase()
+            if (stop && (resolvedParent === stop || resolvedParent === parentStop)) break
             const entries = fs.readdirSync(parent)
             if (entries.length === 0) {
                 fs.rmdirSync(parent)
@@ -459,6 +608,7 @@ async function organizeTorrent(
             return { ...result, total: 1, skipped: 1 }
         }
 
+        const parentSave = path.dirname(savePath)
         const candidates = filePath ? [
             path.join(savePath, filePath),
             path.join(completePath, filePath),
@@ -468,6 +618,10 @@ async function organizeTorrent(
             path.join(completePath, filename),
             path.join(savePath, name, filename),
             path.join(completePath, name, filename),
+            path.join(parentSave, filename),
+            path.join(parentSave, filePath),
+            path.join(parentSave, name, filename),
+            path.join(parentSave, name, filePath),
             path.join(savePath, name),
             path.join(completePath, name),
         ] : [
@@ -475,15 +629,14 @@ async function organizeTorrent(
             path.join(completePath, filename),
             path.join(savePath, name, filename),
             path.join(completePath, name, filename),
+            path.join(parentSave, filename),
+            path.join(parentSave, name, filename),
             path.join(savePath, name),
             path.join(completePath, name),
         ]
 
-        let src: string | null = null
-        for (const c of candidates) {
-            const resolved = resolveSourceFile(c, filename)
-            if (resolved) { src = resolved; break }
-        }
+        const searchDirs = getCandidateSearchDirs(savePath, name, completePath)
+        const src = findSourceFileWithFallback(filename, candidates, searchDirs)
 
         if (!src) {
             error(`Fichier source introuvable : ${filename}\n  Chemins essayés :\n${candidates.map(c => `    - ${c}`).join('\n')}`)
@@ -534,6 +687,10 @@ async function organizeTorrent(
 
     result.total = fileMap.size
 
+    const searchDirs = getCandidateSearchDirs(savePath, name, completePath)
+    const fileCache  = new Map<string, string[]>()
+    const parentSave = path.dirname(savePath)
+
     for (const [filename, { season_number, episode_number, episode_id, nfo_filename, fullPath }] of fileMap) {
         if (isOrganized(hash, episode_id)) { result.skipped++; continue }
 
@@ -552,16 +709,16 @@ async function organizeTorrent(
             path.join(completePath, filename),
             path.join(savePath, name, filename),
             path.join(completePath, name, filename),
+            path.join(parentSave, filename),
+            path.join(parentSave, fullPath),
+            path.join(parentSave, name, filename),
+            path.join(parentSave, name, fullPath),
         ]
-        let src: string | null = null
-        for (const c of candidates) {
-            const resolved = resolveSourceFile(c, filename)
-            if (resolved) { src = resolved; break }
-        }
+        const src = findSourceFileWithFallback(filename, candidates, searchDirs, fileCache)
 
         if (!src) {
             // Pas encore téléchargé ou hors sélection (priorité 0)
-            warn(`Ignoré (fichier absent du disque) : ${filename}\n  Chemins essayés :\n${candidates.map(c => `    - ${c}`).join('\n')}`)
+            debug(`Ignoré (fichier absent du disque) : ${filename}`)
             result.skipped++
             continue
         }
@@ -606,9 +763,13 @@ async function organizeTorrent(
                 })
                 await unlinkWithRetry(src)
                 cleanEmptyParentDir(src, savePath)
+                for (const files of fileCache.values()) {
+                    const idx = files.indexOf(src)
+                    if (idx !== -1) files.splice(idx, 1)
+                }
             }
             result.done++
-            debug(`${nfo_filename} importé dans ${path.basename(destDir)}`)
+            log(`${finalDestName} importé dans ${path.basename(destDir)}`)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Erreur inattendue, consultez les journaux'
             error(`Échec de l'import de « ${filename} » : ${msg}`)
