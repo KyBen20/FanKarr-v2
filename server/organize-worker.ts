@@ -313,6 +313,86 @@ function sanitizeDirName(name: string): string {
         .trim()
 }
 
+// ─── Résolution de fichier (gère le cas où le client crée un dossier du nom du torrent) ─
+const VIDEO_EXTENSIONS = new Set(['.mkv', '.mp4', '.avi', '.mov', '.flv', '.wmv', '.m4v', '.webm', '.ts'])
+
+function findVideoFile(dir: string, targetFilename?: string): string | null {
+    try {
+        if (!fs.existsSync(dir)) return null
+        const entries = fs.readdirSync(dir, { withFileTypes: true })
+
+        // 1. Chercher un fichier exact correspondant au nom attendu
+        if (targetFilename) {
+            const targetLower = targetFilename.toLowerCase()
+            for (const entry of entries) {
+                if (entry.isFile() && entry.name.toLowerCase() === targetLower) {
+                    return path.join(dir, entry.name)
+                }
+            }
+        }
+
+        // 2. Parcourir les fichiers vidéo et sous-dossiers
+        const videos: string[] = []
+        for (const entry of entries) {
+            const full = path.join(dir, entry.name)
+            if (entry.isFile()) {
+                const ext = path.extname(entry.name).toLowerCase()
+                if (VIDEO_EXTENSIONS.has(ext)) {
+                    videos.push(full)
+                }
+            } else if (entry.isDirectory()) {
+                const sub = findVideoFile(full, targetFilename)
+                if (sub) videos.push(sub)
+            }
+        }
+
+        if (videos.length === 1) return videos[0]
+
+        if (videos.length > 1) {
+            if (targetFilename) {
+                const targetBase = path.parse(targetFilename).name.toLowerCase()
+                const match = videos.find(v => path.basename(v).toLowerCase().includes(targetBase))
+                if (match) return match
+            }
+            // Retourner la vidéo la plus volumineuse (évite d'éventuels samples)
+            return videos.reduce((prev, curr) => {
+                const prevSize = fs.statSync(prev).size
+                const currSize = fs.statSync(curr).size
+                return currSize > prevSize ? curr : prev
+            })
+        }
+    } catch {}
+    return null
+}
+
+function resolveSourceFile(candidate: string, targetFilename?: string): string | null {
+    try {
+        if (!fs.existsSync(candidate)) return null
+        const stat = fs.statSync(candidate)
+        if (stat.isFile()) return candidate
+        if (stat.isDirectory()) {
+            return findVideoFile(candidate, targetFilename)
+        }
+    } catch {}
+    return null
+}
+
+function cleanEmptyParentDir(filePath: string, stopAtDir?: string): void {
+    try {
+        let parent = path.dirname(filePath)
+        const stop = stopAtDir ? path.resolve(stopAtDir).toLowerCase() : ''
+        while (parent && (!stop || path.resolve(parent).toLowerCase() !== stop)) {
+            const entries = fs.readdirSync(parent)
+            if (entries.length === 0) {
+                fs.rmdirSync(parent)
+                parent = path.dirname(parent)
+            } else {
+                break
+            }
+        }
+    } catch {}
+}
+
 // ─── Import d'un torrent ──────────────────────────────────────
 async function organizeTorrent(
     hash              : string,
@@ -388,36 +468,48 @@ async function organizeTorrent(
             path.join(completePath, filename),
             path.join(savePath, name, filename),
             path.join(completePath, name, filename),
+            path.join(savePath, name),
+            path.join(completePath, name),
         ] : [
             path.join(savePath, filename),
             path.join(completePath, filename),
             path.join(savePath, name, filename),
             path.join(completePath, name, filename),
+            path.join(savePath, name),
+            path.join(completePath, name),
         ]
 
         let src: string | null = null
-        for (const c of candidates) { if (fs.existsSync(c)) { src = c; break } }
+        for (const c of candidates) {
+            const resolved = resolveSourceFile(c, filename)
+            if (resolved) { src = resolved; break }
+        }
 
         if (!src) {
             error(`Fichier source introuvable : ${filename}\n  Chemins essayés :\n${candidates.map(c => `    - ${c}`).join('\n')}`)
             return { ...result, total: 1, errors: [{ file: filename, error: `Fichier source introuvable (chemins essayés : ${candidates.join(', ')})` }] }
         }
 
-        if (!fs.existsSync(dest)) {
+        const actualExt = path.extname(src) || srcExt
+        const finalDestName = swapExtension(destName, actualExt)
+        const finalDest = path.join(destDir, finalDestName)
+
+        if (!fs.existsSync(finalDest)) {
             fs.mkdirSync(destDir, { recursive: true })
             if (organizeMode === 'copy') {
-              await  fsp.copyFile(src, dest)
+                await fsp.copyFile(src, finalDest)
             } else if (organizeMode === 'hardlink') {
-                if (!tryHardlink(src, dest)) await fsp.copyFile(src, dest)
+                if (!tryHardlink(src, finalDest)) await fsp.copyFile(src, finalDest)
             } else {
-                await fsp.copyFile(src, dest)
+                await fsp.copyFile(src, finalDest)
                 markOrganized(hash, ep.id, {
                     at: new Date().toISOString(), season: season.season_number ?? 1,
                     episode: ep.episode_number, episode_id: ep.id,
-                    src_filename: filename, dest_filename: destName, dest_path: dest, dest_dir: destDir,
+                    src_filename: filename, dest_filename: finalDestName, dest_path: finalDest, dest_dir: destDir,
                 })
                 await unlinkWithRetry(src)
-                log(`${destName} importé dans ${path.basename(destDir)}`)
+                cleanEmptyParentDir(src, savePath)
+                log(`${finalDestName} importé dans ${path.basename(destDir)}`)
                 return { ...result, total: 1, done: 1 }
             }
         }
@@ -425,9 +517,9 @@ async function organizeTorrent(
         markOrganized(hash, ep.id, {
             at: new Date().toISOString(), season: season.season_number ?? 1,
             episode: ep.episode_number, episode_id: ep.id,
-            src_filename: filename, dest_filename: destName, dest_path: dest, dest_dir: destDir,
+            src_filename: filename, dest_filename: finalDestName, dest_path: finalDest, dest_dir: destDir,
         })
-        log(`${destName} importé dans ${path.basename(destDir)}`)
+        log(`${finalDestName} importé dans ${path.basename(destDir)}`)
         return { ...result, total: 1, done: 1 }
     }
 
@@ -462,7 +554,10 @@ async function organizeTorrent(
             path.join(completePath, name, filename),
         ]
         let src: string | null = null
-        for (const c of candidates) { if (fs.existsSync(c)) { src = c; break } }
+        for (const c of candidates) {
+            const resolved = resolveSourceFile(c, filename)
+            if (resolved) { src = resolved; break }
+        }
 
         if (!src) {
             // Pas encore téléchargé ou hors sélection (priorité 0)
@@ -472,13 +567,15 @@ async function organizeTorrent(
         }
 
         const destDir = path.join(mediaPath, serieTitle, seasonFolder(season_number))
-        const dest    = path.join(destDir, nfo_filename)
+        const actualExt = path.extname(src) || path.extname(filename)
+        const finalDestName = swapExtension(nfo_filename, actualExt)
+        const dest    = path.join(destDir, finalDestName)
 
         if (fs.existsSync(dest)) {
             markOrganized(hash, episode_id, {
                 at: new Date().toISOString(), season: season_number,
                 episode: episode_number, episode_id,
-                src_filename: filename, dest_filename: nfo_filename, dest_path: dest, dest_dir: destDir,
+                src_filename: filename, dest_filename: finalDestName, dest_path: dest, dest_dir: destDir,
             })
             result.skipped++
             continue
@@ -491,23 +588,24 @@ async function organizeTorrent(
                 markOrganized(hash, episode_id, {
                     at: new Date().toISOString(), season: season_number,
                     episode: episode_number, episode_id,
-                    src_filename: filename, dest_filename: nfo_filename, dest_path: dest, dest_dir: destDir,
+                    src_filename: filename, dest_filename: finalDestName, dest_path: dest, dest_dir: destDir,
                 })
             } else if (organizeMode === 'hardlink') {
                 if (!tryHardlink(src, dest)) await fsp.copyFile(src, dest)
                 markOrganized(hash, episode_id, {
                     at: new Date().toISOString(), season: season_number,
                     episode: episode_number, episode_id,
-                    src_filename: filename, dest_filename: nfo_filename, dest_path: dest, dest_dir: destDir,
+                    src_filename: filename, dest_filename: finalDestName, dest_path: dest, dest_dir: destDir,
                 })
             } else {
                 await fsp.copyFile(src, dest)
                 markOrganized(hash, episode_id, {
                     at: new Date().toISOString(), season: season_number,
                     episode: episode_number, episode_id,
-                    src_filename: filename, dest_filename: nfo_filename, dest_path: dest, dest_dir: destDir,
+                    src_filename: filename, dest_filename: finalDestName, dest_path: dest, dest_dir: destDir,
                 })
                 await unlinkWithRetry(src)
+                cleanEmptyParentDir(src, savePath)
             }
             result.done++
             debug(`${nfo_filename} importé dans ${path.basename(destDir)}`)
