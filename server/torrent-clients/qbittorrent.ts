@@ -308,7 +308,21 @@ const QB: TorrentClientDriver = {
                 form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
                 res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
             }
-            const text = await res.text()
+            let text = await res.text()
+            if (!isQbAddSuccess(res, text) && !isMagnet) {
+                try {
+                    const fb = new URLSearchParams()
+                    fb.set('urls', url)
+                    if (config.category) fb.set('category', String(config.category))
+                    if (config.savePath)  fb.set('savepath', String(config.savePath))
+                    const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                        method : 'POST', body: fb,
+                        headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+                    })
+                    const fbText = await fbRes.text()
+                    if (isQbAddSuccess(fbRes, fbText)) { res = fbRes; text = fbText }
+                } catch {}
+            }
             if (!isQbAddSuccess(res, text)) throw new Error(`qBittorrent a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
 
             if (hash) {
@@ -363,7 +377,21 @@ const QB: TorrentClientDriver = {
             form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
             res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
         }
-        const text = await res.text()
+        let text = await res.text()
+        if (!isQbAddSuccess(res, text) && !isMagnet) {
+            try {
+                const fb = new URLSearchParams()
+                fb.set('urls', url)
+                if (config.category) fb.set('category', String(config.category))
+                if (config.savePath)  fb.set('savepath', String(config.savePath))
+                const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                    method : 'POST', body: fb,
+                    headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+                })
+                const fbText = await fbRes.text()
+                if (isQbAddSuccess(fbRes, fbText)) { res = fbRes; text = fbText }
+            } catch {}
+        }
         if (!isQbAddSuccess(res, text)) throw new Error(`qBittorrent a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
         logger.info('qbittorrent', `Torrent ajouté (catégorie : ${config.category ?? 'aucune'}${config.savePath ? `, dossier : ${config.savePath}` : ''})`)
     },

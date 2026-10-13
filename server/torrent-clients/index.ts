@@ -100,25 +100,11 @@ interface BunRequestInit extends RequestInit {
 
 const isBun = 'bun' in process.versions
 
-export async function clientFetch(
+export function clientFetch(
     config : ClientConfig,
     url    : string,
     init   : RequestInit = {},
 ): Promise<Response> {
-    if (init.body && typeof init.body === 'object' && 'append' in init.body) {
-        try {
-            const dummy = new Request('http://localhost', { method: 'POST', body: init.body as any })
-            const ct = dummy.headers.get('content-type')
-            if (ct) {
-                const headers = new Headers(init.headers)
-                if (!headers.has('content-type')) {
-                    headers.set('content-type', ct)
-                }
-                init = { ...init, headers }
-            }
-        } catch {}
-    }
-
     if (!ignoreCertificateErrors(config)) return fetch(url, init)
     if (isBun) {
         const bunInit: BunRequestInit = { ...init, tls: { rejectUnauthorized: false } }
@@ -126,7 +112,7 @@ export async function clientFetch(
     }
     if (typeof fetch === 'function') {
         try {
-            return await fetch(url, { ...init, dispatcher: insecureAgent() } as any)
+            return fetch(url, { ...init, dispatcher: insecureAgent() } as any)
         } catch {}
     }
     return undiciFetch(url, { ...init, dispatcher: insecureAgent() } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
