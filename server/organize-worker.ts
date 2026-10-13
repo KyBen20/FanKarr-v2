@@ -305,6 +305,21 @@ function tryHardlink(src: string, dest: string): boolean {
     }
 }
 
+/** Déplace un fichier de manière atomique et instantanée (fsp.rename). Repli sur copie + suppression si systèmes de fichiers distincts (EXDEV). */
+async function moveFile(src: string, dest: string): Promise<void> {
+    try {
+        await fsp.rename(src, dest)
+    } catch (err: any) {
+        if (err?.code === 'EXDEV') {
+            debug(`Déplacement direct impossible (systèmes de fichiers distincts), repli sur copie + suppression`)
+            await fsp.copyFile(src, dest)
+            await unlinkWithRetry(src)
+        } else {
+            throw err
+        }
+    }
+}
+
 function sanitizeDirName(name: string): string {
     return name
         .replace(/:/g, ' -')
@@ -654,13 +669,12 @@ async function organizeTorrent(
             } else if (organizeMode === 'hardlink') {
                 if (!tryHardlink(src, finalDest)) await fsp.copyFile(src, finalDest)
             } else {
-                await fsp.copyFile(src, finalDest)
+                await moveFile(src, finalDest)
                 markOrganized(hash, ep.id, {
                     at: new Date().toISOString(), season: season.season_number ?? 1,
                     episode: ep.episode_number, episode_id: ep.id,
                     src_filename: filename, dest_filename: finalDestName, dest_path: finalDest, dest_dir: destDir,
                 })
-                await unlinkWithRetry(src)
                 cleanEmptyParentDir(src, savePath)
                 log(`${finalDestName} importé dans ${path.basename(destDir)}`)
                 return { ...result, total: 1, done: 1 }
@@ -755,13 +769,12 @@ async function organizeTorrent(
                     src_filename: filename, dest_filename: finalDestName, dest_path: dest, dest_dir: destDir,
                 })
             } else {
-                await fsp.copyFile(src, dest)
+                await moveFile(src, dest)
                 markOrganized(hash, episode_id, {
                     at: new Date().toISOString(), season: season_number,
                     episode: episode_number, episode_id,
                     src_filename: filename, dest_filename: finalDestName, dest_path: dest, dest_dir: destDir,
                 })
-                await unlinkWithRetry(src)
                 cleanEmptyParentDir(src, savePath)
                 for (const files of fileCache.values()) {
                     const idx = files.indexOf(src)
