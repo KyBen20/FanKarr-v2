@@ -502,37 +502,41 @@ const RDTClient: TorrentClientDriver = {
 
             // Tentative 2 (repli) : Émulation qBittorrent classique (/api/v2/torrents/add)
             if (!uploadSuccess) {
-                let res: Response
-                if (isMagnet) {
-                    const params = new URLSearchParams()
-                    params.set('urls', url)
-                    if (config.category) params.set('category', String(config.category))
-                    if (config.savePath)  params.set('savepath', String(config.savePath))
-                    res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                        method : 'POST',
-                        body   : params,
-                        headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-                    })
-                } else if (torrentBytes) {
-                    const fields: Record<string, string> = {}
-                    if (config.category) fields.category = String(config.category)
-                    if (config.savePath)  fields.savepath = String(config.savePath)
-                    const mp = buildMultipart(fields, {
-                        name: 'torrents',
-                        filename: 'torrent.torrent',
-                        data: torrentBytes,
-                        contentType: 'application/x-bittorrent',
-                    })
-                    res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                        method : 'POST',
-                        body   : mp.body as any,
-                        headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
-                    })
-                } else {
-                    throw new Error('Données du torrent indisponibles')
+                const params = new URLSearchParams()
+                params.set('urls', url)
+                if (config.category) params.set('category', String(config.category))
+                if (config.savePath)  params.set('savepath', String(config.savePath))
+                let res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                    method : 'POST',
+                    body   : params,
+                    headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+                })
+                let text = await res.text()
+
+                if (!isRdtAddSuccess(res, text) && torrentBytes) {
+                    try {
+                        const fields: Record<string, string> = {}
+                        if (config.category) fields.category = String(config.category)
+                        if (config.savePath)  fields.savepath = String(config.savePath)
+                        const mp = buildMultipart(fields, {
+                            name: 'torrents',
+                            filename: 'torrent.torrent',
+                            data: torrentBytes,
+                            contentType: 'application/x-bittorrent',
+                        })
+                        const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                            method : 'POST',
+                            body   : mp.body as any,
+                            headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
+                        })
+                        const fbText = await fbRes.text()
+                        if (isRdtAddSuccess(fbRes, fbText)) {
+                            res  = fbRes
+                            text = fbText
+                        }
+                    } catch {}
                 }
 
-                const text = await res.text()
                 if (!isRdtAddSuccess(res, text)) {
                     throw new Error(`RDT-Client a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
                 }

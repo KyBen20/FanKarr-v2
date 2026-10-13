@@ -284,53 +284,50 @@ const QB: TorrentClientDriver = {
                 } catch {}
             }
 
-            // .torrent récupéré par FanKarr : le client n'a pas forcément accès à Internet
-            const isMagnet = url.startsWith('magnet:')
-            let res: Response
+            // Envoi prioritaire via l'URL (application/x-www-form-urlencoded) :
+            // Supporté nativement par qBittorrent et RDT-Client (évite les erreurs de flux multipart ASP.NET Core)
+            const params = new URLSearchParams()
+            params.set('urls', url)
+            if (config.category) params.set('category', String(config.category))
+            if (config.savePath)  params.set('savepath', String(config.savePath))
 
-            if (isMagnet) {
-                const params = new URLSearchParams()
-                params.set('urls', url)
-                if (config.category) params.set('category', String(config.category))
-                if (config.savePath)  params.set('savepath', String(config.savePath))
-                res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                    method: 'POST', body: params,
-                    headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-                })
-            } else {
-                logger.debug('qbittorrent', `Téléchargement du fichier .torrent par FanKarr : ${url.slice(0, 120)}`)
-                const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
-                if (!torrentRes.ok) throw new Error(`Impossible de télécharger le fichier .torrent (HTTP ${torrentRes.status}) : ${url}`)
-                const torrentBytes = await torrentRes.arrayBuffer()
-                const fields: Record<string, string> = {}
-                if (config.category) fields.category = String(config.category)
-                if (config.savePath)  fields.savepath = String(config.savePath)
-                const mp = buildMultipart(fields, {
-                    name: 'torrents',
-                    filename: 'torrent.torrent',
-                    data: torrentBytes,
-                    contentType: 'application/x-bittorrent',
-                })
-                res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                    method : 'POST',
-                    body   : mp.body as any,
-                    headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
-                })
-            }
+            let res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                method : 'POST',
+                body   : params,
+                headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+            })
             let text = await res.text()
-            if (!isQbAddSuccess(res, text) && !isMagnet) {
+
+            // Repli multipart uniquement si urls a échoué et que l'URL est un fichier .torrent HTTP
+            if (!isQbAddSuccess(res, text) && !url.startsWith('magnet:')) {
                 try {
-                    const fb = new URLSearchParams()
-                    fb.set('urls', url)
-                    if (config.category) fb.set('category', String(config.category))
-                    if (config.savePath)  fb.set('savepath', String(config.savePath))
-                    const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                        method : 'POST', body: fb,
-                        headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-                    })
-                    const fbText = await fbRes.text()
-                    if (isQbAddSuccess(fbRes, fbText)) { res = fbRes; text = fbText }
-                } catch {}
+                    logger.debug('qbittorrent', `Tentative de repli par upload du fichier .torrent : ${url.slice(0, 120)}`)
+                    const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
+                    if (torrentRes.ok) {
+                        const torrentBytes = await torrentRes.arrayBuffer()
+                        const fields: Record<string, string> = {}
+                        if (config.category) fields.category = String(config.category)
+                        if (config.savePath)  fields.savepath = String(config.savePath)
+                        const mp = buildMultipart(fields, {
+                            name: 'torrents',
+                            filename: 'torrent.torrent',
+                            data: torrentBytes,
+                            contentType: 'application/x-bittorrent',
+                        })
+                        const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                            method : 'POST',
+                            body   : mp.body as any,
+                            headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
+                        })
+                        const fbText = await fbRes.text()
+                        if (isQbAddSuccess(fbRes, fbText)) {
+                            res  = fbRes
+                            text = fbText
+                        }
+                    }
+                } catch (fbErr) {
+                    logger.debug('qbittorrent', `Échec du repli upload .torrent : ${fbErr instanceof Error ? fbErr.message : fbErr}`)
+                }
             }
             if (!isQbAddSuccess(res, text)) throw new Error(`qBittorrent a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
 
@@ -363,52 +360,48 @@ const QB: TorrentClientDriver = {
         }
 
         // Pas de filtre de fichier (téléchargement intégral)
-        const isMagnet = url.startsWith('magnet:')
-        let res: Response
-        if (isMagnet) {
-            const params = new URLSearchParams()
-            params.set('urls', url)
-            if (config.category) params.set('category', String(config.category))
-            if (config.savePath)  params.set('savepath', String(config.savePath))
+        const params = new URLSearchParams()
+        params.set('urls', url)
+        if (config.category) params.set('category', String(config.category))
+        if (config.savePath)  params.set('savepath', String(config.savePath))
 
-            res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                method: 'POST', body: params,
-                headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-            })
-        } else {
-            logger.debug('qbittorrent', `Téléchargement du fichier .torrent par FanKarr : ${url.slice(0, 120)}`)
-            const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
-            if (!torrentRes.ok) throw new Error(`Impossible de télécharger le fichier .torrent (HTTP ${torrentRes.status}) : ${url}`)
-            const torrentBytes = await torrentRes.arrayBuffer()
-            const fields: Record<string, string> = {}
-            if (config.category) fields.category = String(config.category)
-            if (config.savePath)  fields.savepath = String(config.savePath)
-            const mp = buildMultipart(fields, {
-                name: 'torrents',
-                filename: 'torrent.torrent',
-                data: torrentBytes,
-                contentType: 'application/x-bittorrent',
-            })
-            res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                method : 'POST',
-                body   : mp.body as any,
-                headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
-            })
-        }
+        let res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+            method : 'POST',
+            body   : params,
+            headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+        })
         let text = await res.text()
-        if (!isQbAddSuccess(res, text) && !isMagnet) {
+
+        // Repli multipart si refusé sur URL HTTP
+        if (!isQbAddSuccess(res, text) && !url.startsWith('magnet:')) {
             try {
-                const fb = new URLSearchParams()
-                fb.set('urls', url)
-                if (config.category) fb.set('category', String(config.category))
-                if (config.savePath)  fb.set('savepath', String(config.savePath))
-                const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-                    method : 'POST', body: fb,
-                    headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-                })
-                const fbText = await fbRes.text()
-                if (isQbAddSuccess(fbRes, fbText)) { res = fbRes; text = fbText }
-            } catch {}
+                logger.debug('qbittorrent', `Tentative de repli par upload du fichier .torrent : ${url.slice(0, 120)}`)
+                const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
+                if (torrentRes.ok) {
+                    const torrentBytes = await torrentRes.arrayBuffer()
+                    const fields: Record<string, string> = {}
+                    if (config.category) fields.category = String(config.category)
+                    if (config.savePath)  fields.savepath = String(config.savePath)
+                    const mp = buildMultipart(fields, {
+                        name: 'torrents',
+                        filename: 'torrent.torrent',
+                        data: torrentBytes,
+                        contentType: 'application/x-bittorrent',
+                    })
+                    const fbRes = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                        method : 'POST',
+                        body   : mp.body as any,
+                        headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
+                    })
+                    const fbText = await fbRes.text()
+                    if (isQbAddSuccess(fbRes, fbText)) {
+                        res  = fbRes
+                        text = fbText
+                    }
+                }
+            } catch (fbErr) {
+                logger.debug('qbittorrent', `Échec du repli upload .torrent : ${fbErr instanceof Error ? fbErr.message : fbErr}`)
+            }
         }
         if (!isQbAddSuccess(res, text)) throw new Error(`qBittorrent a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
         logger.info('qbittorrent', `Torrent ajouté (catégorie : ${config.category ?? 'aucune'}${config.savePath ? `, dossier : ${config.savePath}` : ''})`)
