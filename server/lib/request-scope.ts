@@ -36,35 +36,12 @@ export function resolveRequestTorrents(serieData: any, seasons: number[], episod
             torrentMap.set(key, entry)
             toDownload.push(entry)
         } else {
-            // Si l'un des ajouts demande tout le torrent sans filtre, on télécharge le pack complet
-            if (file_index == null && !file_path) {
-                existing.file_index   = null
-                existing.file_path    = null
-                existing.file_indices = null
-                existing.file_paths   = null
-                return
-            }
-            if (existing.file_indices === null && existing.file_paths === null) {
-                return
-            }
-
-            if (!existing.file_indices) existing.file_indices = []
-            if (!existing.file_paths)   existing.file_paths   = []
-
-            if (file_index != null && !existing.file_indices.includes(file_index)) {
-                existing.file_indices.push(file_index)
-            }
-            if (file_path && !existing.file_paths.includes(file_path)) {
-                existing.file_paths.push(file_path)
-            }
-
-            if (existing.file_indices.length > 1 || existing.file_paths.length > 1) {
-                existing.file_index = null
-                existing.file_path  = null
-            } else if (existing.file_indices.length === 1) {
-                existing.file_index = existing.file_indices[0]
-                existing.file_path  = existing.file_paths[0] ?? null
-            }
+            // Si plusieurs épisodes demandent le même torrent ou si l'un demande tout le torrent sans filtre,
+            // on télécharge le torrent complet sans filtre de fichier pour un lancement rapide et complet.
+            existing.file_index   = null
+            existing.file_path    = null
+            existing.file_indices = null
+            existing.file_paths   = null
         }
     }
 
@@ -106,7 +83,15 @@ export function resolveRequestTorrents(serieData: any, seasons: number[], episod
             }
         } else {
             for (const season of serieData.seasons ?? []) {
-                addEpisodesByIndex(season.episodes ?? [])
+                for (const ep of season.episodes ?? []) {
+                    if (ep.torrents?.length > 0) {
+                        addTorrent(ep.torrents[0])
+                    } else if (ep.paths?.length > 0) {
+                        const p    = ep.paths[0]
+                        const pack = allPackTorrents.find((t: any) => t.infohash?.toLowerCase() === p.infohash?.toLowerCase())
+                        if (pack) addTorrent(pack)
+                    }
+                }
             }
         }
     }

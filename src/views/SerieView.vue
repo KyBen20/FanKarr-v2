@@ -624,7 +624,7 @@ type GroupedDlItem = {
   file_paths  ?: string[] | null
 }
 
-function groupDownloadables(items: DlItem[]): GroupedDlItem[] {
+function groupDownloadables(items: DlItem[], forceFullTorrent = false): GroupedDlItem[] {
   const groups = new Map<string, GroupedDlItem>()
 
   for (const item of items) {
@@ -648,35 +648,21 @@ function groupDownloadables(items: DlItem[]): GroupedDlItem[] {
     } else {
       existing.keys.push(item.key)
 
-      // Si l'un des items demande le pack entier sans filtre de fichier
-      if (item.file_index == null && !item.file_path) {
-        existing.file_index   = null
-        existing.file_path    = null
-        existing.file_indices = null
-        existing.file_paths   = null
-        continue
-      }
-      if (existing.file_indices === null && existing.file_paths === null) {
-        continue
-      }
+      // Si plusieurs items partagent le même torrent, on télécharge le torrent complet
+      // sans sélection de fichiers pour un lancement immédiat et fiable
+      existing.file_index   = null
+      existing.file_path    = null
+      existing.file_indices = null
+      existing.file_paths   = null
+    }
+  }
 
-      if (!existing.file_indices) existing.file_indices = []
-      if (!existing.file_paths)   existing.file_paths   = []
-
-      if (item.file_index != null && !existing.file_indices.includes(item.file_index)) {
-        existing.file_indices.push(item.file_index)
-      }
-      if (item.file_path && !existing.file_paths.includes(item.file_path)) {
-        existing.file_paths.push(item.file_path)
-      }
-
-      if (existing.file_indices.length > 1 || existing.file_paths.length > 1) {
-        existing.file_index = null
-        existing.file_path  = null
-      } else if (existing.file_indices.length === 1) {
-        existing.file_index = existing.file_indices[0]
-        existing.file_path  = existing.file_paths[0] ?? null
-      }
+  if (forceFullTorrent) {
+    for (const group of groups.values()) {
+      group.file_index   = null
+      group.file_path    = null
+      group.file_indices = null
+      group.file_paths   = null
     }
   }
 
@@ -712,8 +698,12 @@ function collectDownloadables(integraleIndex?: number): DlItem[] {
     const bringsSomething = coveredByThis.size === 0
       || [...coveredByThis].some(id => !covered.has(id) && !organizedEpisodeIds.value.has(id))
 
-    if (bringsSomething && !isAlreadyQueued(t) && !isDownloaded(`integrale-${i}`))
-      result.push({ key: `integrale-${i}`, torrent_url: t.torrent_url, magnet: t.magnet })
+    if (bringsSomething && !isAlreadyQueued(t) && !isDownloaded(`integrale-${i}`)) {
+      result.push({ key: `integrale-${i}`, torrent_url: t.torrent_url, magnet: t.magnet, infohash: t.infohash ?? null })
+      for (const id of coveredByThis) {
+        result.push({ key: `ep-${id}`, torrent_url: t.torrent_url, magnet: t.magnet, infohash: t.infohash ?? null })
+      }
+    }
 
     for (const id of coveredByThis) covered.add(id)
   }
@@ -725,14 +715,20 @@ function collectDownloadables(integraleIndex?: number): DlItem[] {
     const packKey = (i: number) => (i === 0 ? `season-${season.id}` : `season-${season.id}-${i}`)
     const alreadyHandled = season.torrents.some((t: any, i: number) => isAlreadyQueued(t) || isDownloaded(packKey(i)))
     const t = season.torrents[0]
-    if (!alreadyHandled && t) result.push({ key: packKey(0), torrent_url: t.torrent_url, magnet: t.magnet })
+    if (!alreadyHandled && t) {
+      result.push({ key: packKey(0), torrent_url: t.torrent_url, magnet: t.magnet, infohash: t.infohash ?? null })
+      for (const ep of season.episodes) {
+        result.push({ key: `ep-${ep.id}`, torrent_url: t.torrent_url, magnet: t.magnet, infohash: t.infohash ?? null })
+      }
+    }
     for (const ep of season.episodes) covered.add(ep.id)
   }
 
   for (const season of data.value.seasons)
     for (const ep of season.episodes) {
-      if (!ep.torrent || !ep.available || ep.organized || isAlreadyQueued(ep.torrent) || isDownloaded(`ep-${ep.id}`) || covered.has(ep.id)) continue
-      result.push({ key: `ep-${ep.id}`, torrent_url: ep.torrent.torrent_url, magnet: ep.torrent.magnet, file_index: ep.torrent.file_index ?? null, file_path: ep.torrent.file_path ?? null, infohash: ep.torrent.infohash ?? null })
+      const epTorrent = ep.torrent || ep.torrents?.[0]
+      if (!epTorrent || !ep.available || ep.organized || isAlreadyQueued(epTorrent) || isDownloaded(`ep-${ep.id}`) || covered.has(ep.id)) continue
+      result.push({ key: `ep-${ep.id}`, torrent_url: epTorrent.torrent_url, magnet: epTorrent.magnet, file_index: epTorrent.file_index ?? null, file_path: epTorrent.file_path ?? null, infohash: epTorrent.infohash ?? null })
     }
 
   return result
@@ -744,7 +740,7 @@ const hasSomethingToDownload = computed(() => collectDownloadables().length > 0)
 async function downloadAll(integraleIndex?: number) {
   downloadingAll.value = true
   const torrents = collectDownloadables(integraleIndex)
-  const grouped = groupDownloadables(torrents)
+  const grouped = groupDownloadables(torrents, true)
   let sent = 0
   for (const t of grouped) {
     try {
@@ -781,18 +777,21 @@ async function downloadSeason(season: Season, packHash?: string) {
         : 0
       const i = chosen >= 0 ? chosen : 0
       const t = seasonAny.torrents[i]
-      torrents.push({ key: packKey(i), torrent_url: t.torrent_url, magnet: t.magnet })
+      torrents.push({ key: packKey(i), torrent_url: t.torrent_url, magnet: t.magnet, infohash: t.infohash ?? null })
+      for (const ep of seasonAny.episodes ?? []) {
+        torrents.push({ key: `ep-${ep.id}`, torrent_url: t.torrent_url, magnet: t.magnet, infohash: t.infohash ?? null })
+      }
     }
   } else {
     for (const ep of seasonAny.episodes ?? []) {
       const epTorrent = packHash
-        ? (ep.torrents?.find((t: any) => (t.infohash ?? extractHash(t)) === packHash) ?? ep.torrent)
-        : ep.torrent
+        ? (ep.torrents?.find((t: any) => (t.infohash ?? extractHash(t)) === packHash) ?? ep.torrent ?? ep.torrents?.[0])
+        : (ep.torrent ?? ep.torrents?.[0])
       if (!epTorrent || !ep.available || ep.organized || isAlreadyQueued(epTorrent) || isDownloaded(`ep-${ep.id}`)) continue
       torrents.push({ key: `ep-${ep.id}`, torrent_url: epTorrent.torrent_url, magnet: epTorrent.magnet, file_index: epTorrent.file_index ?? null, file_path: epTorrent.file_path ?? null, infohash: epTorrent.infohash ?? null })
     }
   }
-  const grouped = groupDownloadables(torrents)
+  const grouped = groupDownloadables(torrents, false)
   let sent = 0
   for (const t of grouped) {
     try {

@@ -40,6 +40,7 @@ export interface TorrentFileProgress {
     name   ?: string   // chemin relatif dans le torrent (ex. "Pack S1/Episode1.mkv"), selon le client
     progress: number   // 0–1
     priority: number   // 0 = non téléchargé, 1 = normale, 6 = haute, 7 = maximale
+    size   ?: number
 }
 
 export interface TorrentInfo {

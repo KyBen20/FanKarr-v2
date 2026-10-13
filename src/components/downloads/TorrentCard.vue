@@ -14,7 +14,7 @@
         <div class="flex items-center gap-2.5 min-w-0">
           <div class="relative group/eps min-w-0">
             <p class="text-sm font-medium truncate cursor-default" :class="isImported ? 'text-secondary' : 'text-primary'" :title="torrent.name">
-              {{ torrent.serieName && !torrent.name.startsWith(torrent.serieName) ? torrent.serieName : torrent.name }}
+              {{ displayName }}
             </p>
             <div v-if="episodesWithProgress.length > 0" class="absolute bottom-full left-0 mb-2 hidden group-hover/eps:block z-20 min-w-56 max-w-80">
               <div class="menu p-3 gap-0">
@@ -48,7 +48,7 @@
             <span v-if="torrent.state === 'downloading'">{{ formatSpeed(torrent.speed ?? 0) }}</span>
             <span v-if="torrent.state === 'downloading' && torrent.eta > 0 && formatDuration(torrent.eta) !== '∞'">reste {{ formatDuration(torrent.eta) }}</span>
             <span v-if="torrent.state === 'error'" class="text-err">Le client signale une erreur sur ce torrent</span>
-            <span v-if="columns.size">{{ formatSize(torrent.downloaded) }} sur {{ formatSize(torrent.size) }}</span>
+            <span v-if="columns.size">{{ formatSize(torrent.downloaded) }} sur {{ formatSize(displayTotalSize) }}</span>
           </div>
         </template>
 
@@ -68,7 +68,7 @@
           </div>
           <div v-else class="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted">
             <span>
-              <template v-if="torrent.organizeProgress?.total > 1">{{ torrent.organizeProgress.total }} fichiers · </template>{{ formatSize(torrent.size) }}
+              <template v-if="torrent.organizeProgress?.total > 1">{{ torrent.organizeProgress.total }} fichiers · </template>{{ formatSize(displayTotalSize) }}
             </span>
             <span v-if="torrent.state === 'unknown'" class="text-accent">Le client n'indique pas l'état de ce torrent</span>
             <span v-if="isImported && torrent.importedAt">importé {{ formatRelative(torrent.importedAt) }}</span>
@@ -167,6 +167,25 @@ const clientLine = computed(() => [
   props.columns.client ? props.torrent.client_name : null,
   isDone.value && props.columns.ratio ? `Ratio ${(props.torrent.ratio ?? 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : null,
 ].filter(Boolean).join(' · '))
+
+const displayName = computed(() => {
+  if (!props.torrent.serieName) return props.torrent.name
+  if (props.torrent.name?.toLowerCase().includes(props.torrent.serieName.toLowerCase())) {
+    return props.torrent.name
+  }
+  return `${props.torrent.serieName} · ${props.torrent.name}`
+})
+
+const displayTotalSize = computed(() => {
+  if (Array.isArray(props.torrent.files) && props.torrent.files.length > 0) {
+    const selected = props.torrent.files.filter((f: any) => f.priority > 0 && (f.size ?? 0) > 0)
+    if (selected.length > 0 && selected.length < props.torrent.files.length) {
+      const selectedSum = selected.reduce((sum: number, f: any) => sum + (f.size ?? 0), 0)
+      if (selectedSum > 0) return selectedSum
+    }
+  }
+  return props.torrent.size ?? 0
+})
 
 
 const errorSummary = computed(() => {

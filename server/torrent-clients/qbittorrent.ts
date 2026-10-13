@@ -228,6 +228,7 @@ const QB: TorrentClientDriver = {
                         name    : String(f.name ?? ''),
                         progress: f.progress ?? 0,   // 0–1
                         priority: f.priority ?? 1,
+                        size    : Number(f.size ?? 0),
                     }))
                     : undefined,
             } satisfies TorrentInfo
@@ -246,6 +247,7 @@ const QB: TorrentClientDriver = {
             name    : String(f.name ?? ''),
             progress: f.progress ?? 0,
             priority: f.priority ?? 1,
+            size    : Number(f.size ?? 0),
         }))
     },
 
