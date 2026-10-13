@@ -481,7 +481,7 @@ const RDTClient: TorrentClientDriver = {
                         )
                         nativeRes = await clientFetch(config, `${config.url}/Api/Torrents/UploadFile`, {
                             method : 'POST',
-                            body   : mp.body,
+                            body   : mp.body as any,
                             headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
                         })
                     } else {
@@ -525,7 +525,7 @@ const RDTClient: TorrentClientDriver = {
                     })
                     res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
                         method : 'POST',
-                        body   : mp.body,
+                        body   : mp.body as any,
                         headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
                     })
                 } else {

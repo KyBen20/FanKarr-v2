@@ -98,16 +98,20 @@ interface BunRequestInit extends RequestInit {
     tls?: { rejectUnauthorized?: boolean }
 }
 
+export type ClientRequestInit = Omit<RequestInit, 'body'> & {
+    body?: BodyInit | Buffer | Uint8Array | null | any
+}
+
 const isBun = 'bun' in process.versions
 
 export function clientFetch(
     config : ClientConfig,
     url    : string,
-    init   : RequestInit = {},
+    init   : ClientRequestInit = {},
 ): Promise<Response> {
-    if (!ignoreCertificateErrors(config)) return fetch(url, init)
+    if (!ignoreCertificateErrors(config)) return fetch(url, init as RequestInit)
     if (isBun) {
-        const bunInit: BunRequestInit = { ...init, tls: { rejectUnauthorized: false } }
+        const bunInit: BunRequestInit = { ...(init as RequestInit), tls: { rejectUnauthorized: false } }
         return fetch(url, bunInit)
     }
     if (typeof fetch === 'function') {
