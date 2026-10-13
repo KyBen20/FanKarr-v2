@@ -105,10 +105,15 @@ function escapeRegex(str: string): string {
 }
 
 /**
- * Construit une regex case-insensitive compatible C# pour cibler un fichier précis.
+ * Construit une regex case-insensitive compatible C# pour cibler un ou plusieurs fichiers précis.
  */
-function makeIncludeRegex(fileName: string): string {
-    return `(?i)${escapeRegex(fileName)}`
+function makeIncludeRegex(fileNames: string | string[]): string {
+    const list = Array.isArray(fileNames) ? fileNames : [fileNames]
+    if (list.length === 1) {
+        return `(?i)${escapeRegex(list[0])}`
+    }
+    const escaped = list.map(f => escapeRegex(f)).join('|')
+    return `(?i)(${escaped})`
 }
 
 /**
@@ -208,17 +213,27 @@ async function rdtGetSettings(config: ClientConfig, authHeaders: Record<string, 
     }
 }
 
-async function rdtTorrentExists(config: ClientConfig, authHeaders: Record<string, string>, hash: string): Promise<boolean> {
+async function rdtGetTorrent(config: ClientConfig, authHeaders: Record<string, string>, hash: string): Promise<any | null> {
     try {
         const res = await clientFetch(config, `${config.url}/api/v2/torrents/info?hashes=${hash}`, {
             headers: authHeaders,
         })
-        if (!res.ok) return false
+        if (!res.ok) return null
         const list = await res.json()
-        return Array.isArray(list) && list.length > 0
+        if (Array.isArray(list) && list.length > 0) return list[0]
+        return null
     } catch {
-        return false
+        return null
     }
+}
+
+async function rdtDeleteTorrent(config: ClientConfig, authHeaders: Record<string, string>, hash: string, deleteFiles = false): Promise<void> {
+    const params = new URLSearchParams({ hashes: hash, deleteFiles: deleteFiles ? 'true' : 'false' })
+    await clientFetch(config, `${config.url}/api/v2/torrents/delete`, {
+        method : 'POST',
+        body   : params,
+        headers: { ...authHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
+    })
 }
 
 async function rdtApplyFilePriority(
@@ -360,18 +375,35 @@ const RDTClient: TorrentClientDriver = {
                   || options?.magnet?.match(/xt=urn:btih:([a-fA-F0-9]{40,})/i)?.[1]?.toLowerCase()
                   || null
 
-        if (options?.file_index != null) {
-            if (hash) {
-                const exists = await rdtTorrentExists(config, authH, hash)
-                if (exists) {
-                    logger.info('rdtclient', `Torrent ${hash.slice(0, 8)}… déjà présent, sélection du fichier n° ${options.file_index}`)
-                    rdtApplyFilePriority(config, hash, options.file_index).catch(err =>
-                        logger.warn('rdtclient', `Priorité de fichier non appliquée : ${err instanceof Error ? err.message : err}`)
-                    )
+        const hasFileFilter = (options?.file_index != null)
+            || (options?.file_path != null)
+            || (Array.isArray(options?.file_indices) && options.file_indices.length > 0)
+            || (Array.isArray(options?.file_paths) && options.file_paths.length > 0)
+
+        if (hash) {
+            const existingTorrent = await rdtGetTorrent(config, authH, hash)
+            if (existingTorrent) {
+                const progressVal = typeof existingTorrent.progress === 'number' ? Math.round(existingTorrent.progress * 100) : 0
+                const state = mapState(existingTorrent.state, progressVal)
+                const isFinished = state === 'seeding' || (existingTorrent.progress >= 1)
+
+                if (isFinished) {
+                    logger.info('rdtclient', `Torrent ${hash.slice(0, 8)}… déjà terminé dans RDT-Client : renouvellement pour nouveaux épisodes (fichiers existants conservés sur disque)`)
+                    await rdtDeleteTorrent(config, authH, hash, false).catch(() => {})
+                } else {
+                    logger.info('rdtclient', `Torrent ${hash.slice(0, 8)}… déjà en cours dans RDT-Client`)
+                    const indices = Array.isArray(options?.file_indices) && options.file_indices.length > 0
+                        ? options.file_indices
+                        : (options?.file_index != null ? [options.file_index] : [])
+                    for (const idx of indices) {
+                        rdtApplyFilePriority(config, hash, idx).catch(() => {})
+                    }
                     return
                 }
             }
+        }
 
+        if (hasFileFilter) {
             let knownHashes: Set<string> = new Set()
             if (!hash) {
                 try {
@@ -390,16 +422,35 @@ const RDTClient: TorrentClientDriver = {
                 torrentBytes = await torrentRes.arrayBuffer()
             }
 
-            // Détermination du nom de fichier exact ciblé
-            const targetFileName = (options.file_path || '').split(/[\\/]/).pop()
-                || (torrentBytes ? extractTorrentFileName(torrentBytes, options.file_index) : null)
+            // Détermination des noms de fichiers ciblés (unique ou multiple)
+            const targetFileNames: string[] = []
 
-            const includeRegex = targetFileName ? makeIncludeRegex(targetFileName) : null
+            if (Array.isArray(options?.file_paths) && options.file_paths.length > 0) {
+                for (const fp of options.file_paths) {
+                    const name = (fp || '').split(/[\\/]/).pop()
+                    if (name && !targetFileNames.includes(name)) targetFileNames.push(name)
+                }
+            } else if (options?.file_path) {
+                const name = options.file_path.split(/[\\/]/).pop()
+                if (name) targetFileNames.push(name)
+            }
+
+            if (targetFileNames.length === 0 && torrentBytes) {
+                const indices = Array.isArray(options?.file_indices) && options.file_indices.length > 0
+                    ? options.file_indices
+                    : (options?.file_index != null ? [options.file_index] : [])
+                for (const idx of indices) {
+                    const name = extractTorrentFileName(torrentBytes, idx)
+                    if (name && !targetFileNames.includes(name)) targetFileNames.push(name)
+                }
+            }
+
+            const includeRegex = targetFileNames.length > 0 ? makeIncludeRegex(targetFileNames) : null
 
             let uploadSuccess = false
 
             // Tentative 1 : Upload via l'API native RDT-Client avec includeRegex pour que Real-Debrid
-            // ne sélectionne et ne télécharge QUE ce fichier précis du pack.
+            // ne sélectionne et ne télécharge QUE les fichiers précis du pack.
             if (includeRegex) {
                 try {
                     const settings = await rdtGetSettings(config, authH)
@@ -438,7 +489,7 @@ const RDTClient: TorrentClientDriver = {
 
                     if (nativeRes.ok) {
                         uploadSuccess = true
-                        logger.info('rdtclient', `Torrent envoyé à RDT-Client avec sélection stricte du fichier « ${targetFileName} » (includeRegex)`)
+                        logger.info('rdtclient', `Torrent envoyé à RDT-Client avec sélection stricte de ${targetFileNames.length} fichier(s) (includeRegex)`)
                     } else {
                         const errTxt = await nativeRes.text().catch(() => '')
                         logger.debug('rdtclient', `API native RDT-Client HTTP ${nativeRes.status} (${errTxt}), repli sur qBittorrent add`)
@@ -477,14 +528,19 @@ const RDTClient: TorrentClientDriver = {
                 }
             }
 
+            const indicesToPrioritize = Array.isArray(options?.file_indices) && options.file_indices.length > 0
+                ? options.file_indices
+                : (options?.file_index != null ? [options.file_index] : [])
+
             if (hash) {
-                logger.info('rdtclient', `Torrent ajouté, fichier n° ${options.file_index} configuré`)
-                rdtApplyFilePriority(config, hash, options.file_index).catch(err =>
-                    logger.warn('rdtclient', `Priorité de fichier non appliquée : ${err instanceof Error ? err.message : err}`)
-                )
+                logger.info('rdtclient', `Torrent ajouté (${targetFileNames.length || indicesToPrioritize.length} fichier(s) configuré(s))`)
+                for (const idx of indicesToPrioritize) {
+                    rdtApplyFilePriority(config, hash, idx).catch(err =>
+                        logger.warn('rdtclient', `Priorité de fichier non appliquée (n° ${idx}) : ${err instanceof Error ? err.message : err}`)
+                    )
+                }
             } else {
-                logger.info('rdtclient', `Torrent ajouté sans hash connu : recherche dans la liste (fichier n° ${options.file_index})`)
-                const fileIndex = options.file_index
+                logger.info('rdtclient', `Torrent ajouté sans hash connu : recherche dans la liste (${targetFileNames.length || indicesToPrioritize.length} fichier(s))`)
                 ;(async () => {
                     for (let attempt = 0; attempt < 20; attempt++) {
                         await new Promise(r => setTimeout(r, 1000))
@@ -496,12 +552,14 @@ const RDTClient: TorrentClientDriver = {
                             const newT = list.find((t: any) => !knownHashes.has(String(t.hash).toLowerCase()))
                             if (!newT) continue
                             const resolvedHash = String(newT.hash).toLowerCase()
-                            logger.info('rdtclient', `Hash résolu : ${resolvedHash.slice(0, 8)}…, sélection du fichier n° ${fileIndex}`)
-                            await rdtApplyFilePriority(config, resolvedHash, fileIndex)
+                            logger.info('rdtclient', `Hash résolu : ${resolvedHash.slice(0, 8)}…, configuration des fichiers`)
+                            for (const idx of indicesToPrioritize) {
+                                await rdtApplyFilePriority(config, resolvedHash, idx)
+                            }
                             return
                         } catch {}
                     }
-                    logger.warn('rdtclient', `Hash introuvable : impossible de sélectionner le fichier n° ${fileIndex}`)
+                    logger.warn('rdtclient', `Hash introuvable : impossible de sélectionner les fichiers du torrent`)
                 })().catch(() => {})
             }
             return

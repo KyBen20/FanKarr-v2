@@ -1,9 +1,17 @@
-export type RequestTorrent = { url: string; magnet: string | null; infohash: string | null; file_index?: number | null; file_path?: string | null }
+export type RequestTorrent = {
+    url          : string
+    magnet       : string | null
+    infohash     : string | null
+    file_index  ?: number | null
+    file_path   ?: string | null
+    file_indices?: number[] | null
+    file_paths  ?: string[] | null
+}
 
 /** Torrents à envoyer : épisodes ciblés, sinon saisons ciblées, sinon toute la série. */
 export function resolveRequestTorrents(serieData: any, seasons: number[], episodes: number[]): RequestTorrent[] {
     const toDownload: RequestTorrent[] = []
-    const seenHashes = new Set<string>()
+    const torrentMap = new Map<string, RequestTorrent>()
 
     const allPackTorrents: any[] = [
         ...(serieData.torrents ?? []),
@@ -11,10 +19,53 @@ export function resolveRequestTorrents(serieData: any, seasons: number[], episod
     ]
 
     function addTorrent(t: any, file_index?: number | null, file_path?: string | null) {
-        const key = `${t.infohash ?? t.magnet ?? t.torrent_url}:${file_index ?? ''}`
-        if (seenHashes.has(key)) return
-        seenHashes.add(key)
-        toDownload.push({ url: t.torrent_url, magnet: t.magnet ?? null, infohash: t.infohash ?? null, file_index: file_index ?? null, file_path: file_path ?? null })
+        const key = (t.infohash?.toLowerCase()) || t.magnet || t.torrent_url
+        if (!key) return
+
+        const existing = torrentMap.get(key)
+        if (!existing) {
+            const entry: RequestTorrent = {
+                url         : t.torrent_url,
+                magnet      : t.magnet ?? null,
+                infohash    : t.infohash ?? null,
+                file_index  : file_index ?? null,
+                file_path   : file_path ?? null,
+                file_indices: file_index != null ? [file_index] : (file_path ? [] : null),
+                file_paths  : file_path ? [file_path] : null,
+            }
+            torrentMap.set(key, entry)
+            toDownload.push(entry)
+        } else {
+            // Si l'un des ajouts demande tout le torrent sans filtre, on télécharge le pack complet
+            if (file_index == null && !file_path) {
+                existing.file_index   = null
+                existing.file_path    = null
+                existing.file_indices = null
+                existing.file_paths   = null
+                return
+            }
+            if (existing.file_indices === null && existing.file_paths === null) {
+                return
+            }
+
+            if (!existing.file_indices) existing.file_indices = []
+            if (!existing.file_paths)   existing.file_paths   = []
+
+            if (file_index != null && !existing.file_indices.includes(file_index)) {
+                existing.file_indices.push(file_index)
+            }
+            if (file_path && !existing.file_paths.includes(file_path)) {
+                existing.file_paths.push(file_path)
+            }
+
+            if (existing.file_indices.length > 1 || existing.file_paths.length > 1) {
+                existing.file_index = null
+                existing.file_path  = null
+            } else if (existing.file_indices.length === 1) {
+                existing.file_index = existing.file_indices[0]
+                existing.file_path  = existing.file_paths[0] ?? null
+            }
+        }
     }
 
     function addEpisodesByIndex(epList: any[]) {

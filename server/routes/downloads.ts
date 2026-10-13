@@ -18,11 +18,20 @@ router.post('/download', requireAuth, async (req, res) => {
     const magnet     : string | null = req.body.magnet      ?? null
     const url = torrent_url ?? magnet
     if (!url) { res.status(400).json({ error: 'Lien du torrent ou magnet requis' }); return }
-    const file_index: number | null = req.body.file_index != null ? Number(req.body.file_index) : null
-    const file_path : string | null = req.body.file_path  ?? null
-    const infohash  : string | null = req.body.infohash   ?? null
-    logger.info('api', `Téléchargement demandé via ${torrent_url ? '.torrent' : 'magnet'}${file_path ? ` (${file_path})` : ''}`)
-    const results = await dispatchDownload(url, { file_index, file_path, infohash, magnet })
+    const file_index  : number | null   = req.body.file_index != null ? Number(req.body.file_index) : null
+    const file_path   : string | null   = req.body.file_path  ?? null
+    const file_indices: number[] | null = Array.isArray(req.body.file_indices)
+        ? req.body.file_indices.map(Number)
+        : (file_index != null ? [file_index] : null)
+    const file_paths  : string[] | null = Array.isArray(req.body.file_paths)
+        ? req.body.file_paths.map(String)
+        : (file_path ? [file_path] : null)
+    const infohash    : string | null   = req.body.infohash   ?? null
+    const label = file_paths?.length
+        ? ` (${file_paths.length > 1 ? `${file_paths.length} fichiers` : file_paths[0]})`
+        : ''
+    logger.info('api', `Téléchargement demandé via ${torrent_url ? '.torrent' : 'magnet'}${label}`)
+    const results = await dispatchDownload(url, { file_index, file_path, file_indices, file_paths, infohash, magnet })
     res.status(results.every((r: any) => r.ok) ? 200 : 207).json({ results })
 })
 

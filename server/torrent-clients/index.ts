@@ -60,10 +60,12 @@ export interface TorrentInfo {
 }
 
 export interface DownloadOptions {
-    file_index?: number | null
-    file_path ?: string | null
-    infohash  ?: string | null   // hash issu du catalogue (plus fiable que le magnet)
-    magnet    ?: string | null
+    file_index  ?: number | null
+    file_path   ?: string | null
+    file_indices?: number[] | null
+    file_paths  ?: string[] | null
+    infohash    ?: string | null   // hash issu du catalogue (plus fiable que le magnet)
+    magnet      ?: string | null
 }
 
 export interface TorrentClientDriver {

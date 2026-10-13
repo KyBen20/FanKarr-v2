@@ -613,6 +613,76 @@ async function download(key: string, torrent_url: string | null, magnet: string 
 
 type DlItem = { key: string; torrent_url: string | null; magnet: string | null; file_index?: number | null; file_path?: string | null; infohash?: string | null }
 
+type GroupedDlItem = {
+  keys         : string[]
+  torrent_url  : string | null
+  magnet       : string | null
+  file_index  ?: number | null
+  file_path   ?: string | null
+  infohash    ?: string | null
+  file_indices?: number[] | null
+  file_paths  ?: string[] | null
+}
+
+function groupDownloadables(items: DlItem[]): GroupedDlItem[] {
+  const groups = new Map<string, GroupedDlItem>()
+
+  for (const item of items) {
+    const key = (item.infohash?.toLowerCase())
+      || item.magnet
+      || item.torrent_url
+      || item.key
+
+    const existing = groups.get(key)
+    if (!existing) {
+      groups.set(key, {
+        keys         : [item.key],
+        torrent_url  : item.torrent_url,
+        magnet       : item.magnet,
+        infohash     : item.infohash,
+        file_index   : item.file_index ?? null,
+        file_path    : item.file_path ?? null,
+        file_indices : item.file_index != null ? [item.file_index] : (item.file_path ? [] : null),
+        file_paths   : item.file_path ? [item.file_path] : null,
+      })
+    } else {
+      existing.keys.push(item.key)
+
+      // Si l'un des items demande le pack entier sans filtre de fichier
+      if (item.file_index == null && !item.file_path) {
+        existing.file_index   = null
+        existing.file_path    = null
+        existing.file_indices = null
+        existing.file_paths   = null
+        continue
+      }
+      if (existing.file_indices === null && existing.file_paths === null) {
+        continue
+      }
+
+      if (!existing.file_indices) existing.file_indices = []
+      if (!existing.file_paths)   existing.file_paths   = []
+
+      if (item.file_index != null && !existing.file_indices.includes(item.file_index)) {
+        existing.file_indices.push(item.file_index)
+      }
+      if (item.file_path && !existing.file_paths.includes(item.file_path)) {
+        existing.file_paths.push(item.file_path)
+      }
+
+      if (existing.file_indices.length > 1 || existing.file_paths.length > 1) {
+        existing.file_index = null
+        existing.file_path  = null
+      } else if (existing.file_indices.length === 1) {
+        existing.file_index = existing.file_indices[0]
+        existing.file_path  = existing.file_paths[0] ?? null
+      }
+    }
+  }
+
+  return [...groups.values()]
+}
+
 // Reste à envoyer : une intégrale (ou toutes), puis packs et épisodes non couverts
 function collectDownloadables(integraleIndex?: number): DlItem[] {
   if (!data.value) return []
@@ -674,9 +744,24 @@ const hasSomethingToDownload = computed(() => collectDownloadables().length > 0)
 async function downloadAll(integraleIndex?: number) {
   downloadingAll.value = true
   const torrents = collectDownloadables(integraleIndex)
+  const grouped = groupDownloadables(torrents)
   let sent = 0
-  for (const t of torrents) {
-    try { const r = await store.download(t.torrent_url, t.magnet, t.file_index, t.file_path, t.infohash); if (r.success) { addDownloaded(t.key); sent++ } } catch {}
+  for (const t of grouped) {
+    try {
+      const r = await store.download(
+        t.torrent_url,
+        t.magnet,
+        t.file_index,
+        t.file_path,
+        t.infohash,
+        t.file_indices,
+        t.file_paths,
+      )
+      if (r.success) {
+        for (const k of t.keys) addDownloaded(k)
+        sent++
+      }
+    } catch {}
   }
   downloadingAll.value = false
   if (sent > 0) { toast(`${plural(sent, 'torrent envoyé', 'torrents envoyés')} au client`, 'success'); fetchActiveDownloads() }
@@ -707,9 +792,24 @@ async function downloadSeason(season: Season, packHash?: string) {
       torrents.push({ key: `ep-${ep.id}`, torrent_url: epTorrent.torrent_url, magnet: epTorrent.magnet, file_index: epTorrent.file_index ?? null, file_path: epTorrent.file_path ?? null, infohash: epTorrent.infohash ?? null })
     }
   }
+  const grouped = groupDownloadables(torrents)
   let sent = 0
-  for (const t of torrents) {
-    try { const r = await store.download(t.torrent_url, t.magnet, t.file_index, t.file_path, t.infohash); if (r.success) { addDownloaded(t.key); sent++ } } catch {}
+  for (const t of grouped) {
+    try {
+      const r = await store.download(
+        t.torrent_url,
+        t.magnet,
+        t.file_index,
+        t.file_path,
+        t.infohash,
+        t.file_indices,
+        t.file_paths,
+      )
+      if (r.success) {
+        for (const k of t.keys) addDownloaded(k)
+        sent++
+      }
+    } catch {}
   }
   downloadingSeason.value[season.id] = false
   if (sent > 0) { toast(`${plural(sent, 'torrent envoyé', 'torrents envoyés')} au client`, 'success'); fetchActiveDownloads() }
