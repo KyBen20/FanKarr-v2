@@ -797,7 +797,7 @@ parentPort?.on('message', async (msg: any) => {
     }
 
     for (const t of torrents) {
-        if (t.state !== 'seeding') continue
+        if (t.state !== 'seeding' && !(t.progress >= 100 && t.state !== 'downloading' && t.state !== 'error' && t.state !== 'checking')) continue
 
         let found = findTorrentByHash(t.hash, seriesData)
         let effectiveHash = t.hash

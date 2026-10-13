@@ -4,22 +4,36 @@ import type { TorrentClientDriver, TorrentInfo, DownloadOptions, ClientConfig } 
 import { clientFetch } from './index.js'
 import { logger } from '../logger.js'
 
-// Réponse « Ok. », ou JSON derrière certains reverse proxies
-function isQbAddSuccess(text: string): boolean {
-    if (text.trim() === 'Ok.') return true
-    try {
-        const json = JSON.parse(text)
-        if (typeof json?.success_count === 'number') return json.success_count > 0
-    } catch {}
+// Réponse « Ok. », HTTP 200 vide (RDT-Client / proxies), ou JSON de succès
+function isQbAddSuccess(res: Response, text: string): boolean {
+    const trimmed = text.trim()
+    if (trimmed === 'Ok.') return true
+    if (res.ok) {
+        if (trimmed === 'Ok' || trimmed === '') return true
+        try {
+            const json = JSON.parse(text)
+            if (typeof json?.success_count === 'number') return json.success_count > 0
+            if (json?.success === true || json?.result === true || json?.status === 'success') return true
+        } catch {}
+        const lower = trimmed.toLowerCase()
+        if (!lower.includes('fail') && !lower.includes('error')) return true
+    }
     return false
 }
 
-function mapState(state: string): TorrentInfo['state'] {
+function mapState(state: string, progress = 0): TorrentInfo['state'] {
+    if ([
+        'uploading', 'queuedUP', 'stalledUP', 'forcedUP',
+        'finished', 'completed',
+        'pausedUP', 'stoppedUP',
+    ].includes(state)) {
+        return 'seeding'
+    }
+    if (progress >= 1) return 'seeding'
     if (['downloading', 'metaDL', 'queuedDL', 'stalledDL', 'forcedDL'].includes(state)) return 'downloading'
-    if (['uploading', 'queuedUP', 'stalledUP', 'forcedUP'].includes(state))              return 'seeding'
-    if (['pausedDL', 'pausedUP', 'stoppedDL', 'stoppedUP'].includes(state))              return 'paused'
-    if (['checkingDL', 'checkingUP', 'checkingResumeData'].includes(state))               return 'checking'
-    if (state === 'error' || state === 'missingFiles')                                    return 'error'
+    if (['checkingDL', 'checkingUP', 'checkingResumeData'].includes(state)) return 'checking'
+    if (state === 'error' || state === 'missingFiles') return 'error'
+    if (['pausedDL', 'stoppedDL'].includes(state)) return 'paused'
     return 'unknown'
 }
 
@@ -64,10 +78,10 @@ async function qbTorrentExists(config: ClientConfig, authHeaders: Record<string,
     }
 }
 
-async function qbApplyFilePriority(
-    config   : ClientConfig,
-    hash     : string,
-    fileIndex: number,
+async function qbApplyFilePriorities(
+    config     : ClientConfig,
+    hash       : string,
+    fileIndices: number[],
 ): Promise<void> {
     for (let attempt = 0; attempt < 60; attempt++) {
         await new Promise(r => setTimeout(r, attempt === 0 ? 100 : 500))
@@ -80,17 +94,18 @@ async function qbApplyFilePriority(
             const files: any[] = await res.json()
             if (!Array.isArray(files) || files.length === 0) continue
 
-            if (fileIndex >= files.length) {
-                throw new Error(`Fichier n° ${fileIndex} hors limites : le torrent contient ${files.length} fichiers`)
+            const validIndices = fileIndices.filter(i => i < files.length)
+            if (validIndices.length === 0) {
+                logger.warn('qbittorrent', `Indices demandés hors limites : le torrent contient ${files.length} fichiers`)
+                return
             }
 
-            // Premier épisode choisi : tout désactiver sauf la cible ; sinon activer seulement la cible
+            // Premier épisode choisi : tout désactiver sauf les cibles ; sinon activer seulement les cibles
             const isInitialState = files.every((f: any) => (f.priority ?? 1) > 0)
-
             const headers = { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' }
 
             if (isInitialState) {
-                const unwanted = files.map((_, i) => i).filter(i => i !== fileIndex)
+                const unwanted = files.map((_, i) => i).filter(i => !validIndices.includes(i))
                 if (unwanted.length > 0) {
                     const body = new URLSearchParams({ hash, id: unwanted.join('|'), priority: '0' })
                     const r = await clientFetch(config, `${config.url}/api/v2/torrents/filePrio`, { method: 'POST', body, headers })
@@ -100,29 +115,27 @@ async function qbApplyFilePriority(
 
             const r2 = await clientFetch(config, `${config.url}/api/v2/torrents/filePrio`, {
                 method: 'POST',
-                body   : new URLSearchParams({ hash, id: String(fileIndex), priority: '1' }),
+                body  : new URLSearchParams({ hash, id: validIndices.join('|'), priority: '1' }),
                 headers,
             })
-            if (!r2.ok) { logger.warn('qbittorrent', `Priorité du fichier cible non appliquée (HTTP ${r2.status}), nouvel essai`); continue }
+            if (!r2.ok) { logger.warn('qbittorrent', `Priorité des fichiers cibles non appliquée (HTTP ${r2.status}), nouvel essai`); continue }
 
-            const verif = await clientFetch(config, `${config.url}/api/v2/torrents/files?hash=${hash}`, { headers: authH })
-            if (verif.ok) {
-                const verifiedFiles: any[] = await verif.json()
-                const target = verifiedFiles[fileIndex]
-                if (!target || (target.priority ?? 0) === 0) {
-                    logger.warn('qbittorrent', `Fichier n° ${fileIndex} toujours à priorité 0 après application, nouvel essai`)
-                    continue
-                }
-            }
-
-            logger.info('qbittorrent', `Fichier n° ${fileIndex} sélectionné pour ${hash.slice(0, 8)}…`)
+            logger.info('qbittorrent', `${validIndices.length} fichier(s) sélectionné(s) pour ${hash.slice(0, 8)}…`)
             return
         } catch (err) {
             if (err instanceof Error && err.message.includes('hors limites')) throw err
         }
     }
 
-    throw new Error(`Délai dépassé : métadonnées du torrent ${hash.slice(0, 8)}… toujours indisponibles`)
+    logger.warn('qbittorrent', `Métadonnées des fichiers du torrent ${hash.slice(0, 8)}… non configurées (le téléchargement global continue)`)
+}
+
+async function qbApplyFilePriority(
+    config   : ClientConfig,
+    hash     : string,
+    fileIndex: number,
+): Promise<void> {
+    return qbApplyFilePriorities(config, hash, [fileIndex])
 }
 
 const QB: TorrentClientDriver = {
@@ -198,7 +211,7 @@ const QB: TorrentClientDriver = {
             return {
                 hash      : t.hash,
                 name      : t.name,
-                state     : mapState(t.state),
+                state     : mapState(t.state, t.progress),
                 progress  : Math.round(t.progress * 100),
                 size      : t.size,
                 downloaded: t.downloaded,
@@ -244,12 +257,18 @@ const QB: TorrentClientDriver = {
                   || options?.magnet?.match(/xt=urn:btih:([a-fA-F0-9]{40,})/i)?.[1]?.toLowerCase()
                   || null
 
-        if (options?.file_index != null) {
+        const targetIndices: number[] = Array.isArray(options?.file_indices) && options.file_indices.length > 0
+            ? options.file_indices
+            : (options?.file_index != null ? [options.file_index] : [])
+
+        const hasFileFilter = targetIndices.length > 0
+
+        if (hasFileFilter) {
             if (hash) {
                 const exists = await qbTorrentExists(config, authH, hash)
                 if (exists) {
-                    logger.info('qbittorrent', `Torrent ${hash.slice(0, 8)}… déjà présent, sélection du fichier n° ${options.file_index}`)
-                    qbApplyFilePriority(config, hash, options.file_index).catch(err =>
+                    logger.info('qbittorrent', `Torrent ${hash.slice(0, 8)}… déjà présent, sélection de ${targetIndices.length} fichier(s)`)
+                    qbApplyFilePriorities(config, hash, targetIndices).catch(err =>
                         logger.warn('qbittorrent', `Priorité de fichier non appliquée : ${err instanceof Error ? err.message : err}`)
                     )
                     return
@@ -290,16 +309,15 @@ const QB: TorrentClientDriver = {
                 res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
             }
             const text = await res.text()
-            if (!isQbAddSuccess(text)) throw new Error(`qBittorrent a refusé le torrent : ${text}`)
+            if (!isQbAddSuccess(res, text)) throw new Error(`qBittorrent a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
 
             if (hash) {
-                logger.info('qbittorrent', `Torrent ajouté, fichier n° ${options.file_index} sélectionné dès réception des métadonnées`)
-                qbApplyFilePriority(config, hash, options.file_index).catch(err =>
+                logger.info('qbittorrent', `Torrent ajouté, sélection de ${targetIndices.length} fichier(s) dès réception des métadonnées`)
+                qbApplyFilePriorities(config, hash, targetIndices).catch(err =>
                     logger.warn('qbittorrent', `Priorité de fichier non appliquée : ${err instanceof Error ? err.message : err}`)
                 )
             } else {
-                logger.info('qbittorrent', `Torrent ajouté sans hash connu : recherche dans la liste (fichier n° ${options.file_index})`)
-                const fileIndex = options.file_index
+                logger.info('qbittorrent', `Torrent ajouté sans hash connu : recherche dans la liste (${targetIndices.length} fichier(s))`)
                 ;(async () => {
                     for (let attempt = 0; attempt < 20; attempt++) {
                         await new Promise(r => setTimeout(r, 500))
@@ -310,28 +328,43 @@ const QB: TorrentClientDriver = {
                             const newT = (await lr.json()).find((t: any) => !knownHashes.has(String(t.hash).toLowerCase()))
                             if (!newT) continue
                             const resolvedHash = String(newT.hash).toLowerCase()
-                            logger.info('qbittorrent', `Hash résolu : ${resolvedHash.slice(0, 8)}…, sélection du fichier n° ${fileIndex}`)
-                            await qbApplyFilePriority(config, resolvedHash, fileIndex)
+                            logger.info('qbittorrent', `Hash résolu : ${resolvedHash.slice(0, 8)}…, sélection des fichiers`)
+                            await qbApplyFilePriorities(config, resolvedHash, targetIndices)
                             return
                         } catch {}
                     }
-                    logger.warn('qbittorrent', `Hash introuvable : impossible de sélectionner le fichier n° ${fileIndex}`)
+                    logger.warn('qbittorrent', `Hash introuvable : impossible de sélectionner les fichiers demandés`)
                 })().catch(() => {})
             }
             return
         }
 
-        const params = new URLSearchParams()
-        params.set('urls', url)
-        if (config.category) params.set('category', String(config.category))
-        if (config.savePath)  params.set('savepath', String(config.savePath))
+        // Pas de filtre de fichier (téléchargement intégral)
+        const isMagnet = url.startsWith('magnet:')
+        let res: Response
+        if (isMagnet) {
+            const params = new URLSearchParams()
+            params.set('urls', url)
+            if (config.category) params.set('category', String(config.category))
+            if (config.savePath)  params.set('savepath', String(config.savePath))
 
-        const res  = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
-            method: 'POST', body: params,
-            headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-        })
+            res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                method: 'POST', body: params,
+                headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+            })
+        } else {
+            logger.debug('qbittorrent', `Téléchargement du fichier .torrent par FanKarr : ${url.slice(0, 120)}`)
+            const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
+            if (!torrentRes.ok) throw new Error(`Impossible de télécharger le fichier .torrent (HTTP ${torrentRes.status}) : ${url}`)
+            const torrentBytes = await torrentRes.arrayBuffer()
+            const form = new FormData()
+            if (config.category) form.append('category', String(config.category))
+            if (config.savePath)  form.append('savepath', String(config.savePath))
+            form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
+            res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
+        }
         const text = await res.text()
-        if (!isQbAddSuccess(text)) throw new Error(`qBittorrent a refusé le torrent : ${text}`)
+        if (!isQbAddSuccess(res, text)) throw new Error(`qBittorrent a refusé le torrent : ${text.trim() || `HTTP ${res.status}`}`)
         logger.info('qbittorrent', `Torrent ajouté (catégorie : ${config.category ?? 'aucune'}${config.savePath ? `, dossier : ${config.savePath}` : ''})`)
     },
 

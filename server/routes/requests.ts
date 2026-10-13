@@ -72,10 +72,12 @@ router.post('/requests', (req, res) => {
             if (torrentOverride?.torrent_url || torrentOverride?.magnet) {
                 const url = torrentOverride.torrent_url ?? torrentOverride.magnet
                 dispatchDownload(url, {
-                    infohash  : torrentOverride.infohash   ?? null,
-                    magnet    : torrentOverride.magnet     ?? null,
-                    file_index: torrentOverride.file_index ?? null,
-                    file_path : torrentOverride.file_path  ?? null,
+                    infohash    : torrentOverride.infohash   ?? null,
+                    magnet      : torrentOverride.magnet     ?? null,
+                    file_index  : torrentOverride.file_index ?? null,
+                    file_path   : torrentOverride.file_path  ?? null,
+                    file_indices: torrentOverride.file_indices ?? (torrentOverride.file_index != null ? [torrentOverride.file_index] : null),
+                    file_paths  : torrentOverride.file_paths ?? (torrentOverride.file_path ? [torrentOverride.file_path] : null),
                 }).catch(err =>
                     logger.warn('requests', `Échec du téléchargement automatique du torrent choisi pour « ${request.serieName} » : ${err instanceof Error ? err.message : err}`)
                 )

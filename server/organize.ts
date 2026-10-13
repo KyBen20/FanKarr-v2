@@ -317,12 +317,16 @@ export async function autoOrganizeAll(
 
     if (torrents.length === 0) return
 
+    const isFinished = (t: any) =>
+        t.state === 'seeding' || (t.progress >= 100 && t.state !== 'downloading' && t.state !== 'error' && t.state !== 'checking')
+
     const isFirstRun   = _prevStates.size === 0
-    const seedingCount = torrents.filter(t => t.state === 'seeding').length
+    const seedingCount = torrents.filter(isFinished).length
 
     const newlySeeding = torrents.filter(t => {
         const prev = _prevStates.get(t.hash)
-        return t.state === 'seeding' && (prev === undefined || prev !== 'seeding')
+        const currentFinished = isFinished(t)
+        return currentFinished && (prev === undefined || prev !== 'seeding')
     })
 
     for (const t of torrents) _prevStates.set(t.hash, t.state)
@@ -335,7 +339,7 @@ export async function autoOrganizeAll(
     }
 
     const hasUnorganized = torrents.some(t =>
-        t.state === 'seeding' && !organized[t.hash?.toLowerCase()]
+        isFinished(t) && !organized[t.hash?.toLowerCase()]
     )
 
     if (!isFirstRun && newlySeeding.length === 0 && !hasUnorganized) return
