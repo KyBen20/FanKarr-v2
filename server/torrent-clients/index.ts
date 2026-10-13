@@ -118,6 +118,33 @@ export function clientFetch(
     return undiciFetch(url, { ...init, dispatcher: insecureAgent() } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
 }
 
+/**
+ * Construit un corps HTTP multipart/form-data fiable en mémoire sous forme de Buffer.
+ * Évite les désynchronisations de flux / EOF inattendu entre Node.js, Undici et ASP.NET Core.
+ */
+export function buildMultipart(
+    fields: Record<string, string>,
+    file: { name: string; filename: string; data: Buffer | ArrayBuffer; contentType?: string }
+): { body: Buffer; contentType: string } {
+    const boundary = `----FanKarrBoundary${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`
+    const chunks: Buffer[] = []
+    for (const [k, v] of Object.entries(fields)) {
+        if (v == null || v === '') continue
+        chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`))
+    }
+    const fileBuf = Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data)
+    const ct = file.contentType || 'application/x-bittorrent'
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${file.name}"; filename="${file.filename}"\r\nContent-Type: ${ct}\r\n\r\n`))
+    chunks.push(fileBuf)
+    chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`))
+
+    const body = Buffer.concat(chunks)
+    return {
+        body,
+        contentType: `multipart/form-data; boundary=${boundary}`,
+    }
+}
+
 // ─── Registre ─────────────────────────────────────────────────────────────────
 
 const drivers = new Map<string, TorrentClientDriver>()

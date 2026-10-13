@@ -1,7 +1,7 @@
 /** qBittorrent 4.x et 5.x (clé API à partir de 5.2.0). */
 
 import type { TorrentClientDriver, TorrentInfo, DownloadOptions, ClientConfig } from './index.js'
-import { clientFetch } from './index.js'
+import { clientFetch, buildMultipart } from './index.js'
 import { logger } from '../logger.js'
 
 // Réponse « Ok. », HTTP 200 vide (RDT-Client / proxies), ou JSON de succès
@@ -302,11 +302,20 @@ const QB: TorrentClientDriver = {
                 const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
                 if (!torrentRes.ok) throw new Error(`Impossible de télécharger le fichier .torrent (HTTP ${torrentRes.status}) : ${url}`)
                 const torrentBytes = await torrentRes.arrayBuffer()
-                const form = new FormData()
-                if (config.category) form.append('category', String(config.category))
-                if (config.savePath)  form.append('savepath', String(config.savePath))
-                form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
-                res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
+                const fields: Record<string, string> = {}
+                if (config.category) fields.category = String(config.category)
+                if (config.savePath)  fields.savepath = String(config.savePath)
+                const mp = buildMultipart(fields, {
+                    name: 'torrents',
+                    filename: 'torrent.torrent',
+                    data: torrentBytes,
+                    contentType: 'application/x-bittorrent',
+                })
+                res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                    method : 'POST',
+                    body   : mp.body,
+                    headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
+                })
             }
             let text = await res.text()
             if (!isQbAddSuccess(res, text) && !isMagnet) {
@@ -371,11 +380,20 @@ const QB: TorrentClientDriver = {
             const torrentRes = await fetch(url, { headers: { 'User-Agent': 'FanKarr/1.0' } })
             if (!torrentRes.ok) throw new Error(`Impossible de télécharger le fichier .torrent (HTTP ${torrentRes.status}) : ${url}`)
             const torrentBytes = await torrentRes.arrayBuffer()
-            const form = new FormData()
-            if (config.category) form.append('category', String(config.category))
-            if (config.savePath)  form.append('savepath', String(config.savePath))
-            form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
-            res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
+            const fields: Record<string, string> = {}
+            if (config.category) fields.category = String(config.category)
+            if (config.savePath)  fields.savepath = String(config.savePath)
+            const mp = buildMultipart(fields, {
+                name: 'torrents',
+                filename: 'torrent.torrent',
+                data: torrentBytes,
+                contentType: 'application/x-bittorrent',
+            })
+            res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                method : 'POST',
+                body   : mp.body,
+                headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
+            })
         }
         let text = await res.text()
         if (!isQbAddSuccess(res, text) && !isMagnet) {

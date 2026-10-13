@@ -5,7 +5,7 @@
  */
 
 import type { TorrentClientDriver, TorrentInfo, DownloadOptions, ClientConfig } from './index.js'
-import { clientFetch } from './index.js'
+import { clientFetch, buildMultipart } from './index.js'
 import { logger } from '../logger.js'
 
 /**
@@ -475,13 +475,14 @@ const RDTClient: TorrentClientDriver = {
                             body   : JSON.stringify({ magnetLink: url, torrent: torrentPayload }),
                         })
                     } else if (torrentBytes) {
-                        const form = new FormData()
-                        form.append('file', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
-                        form.append('formData', JSON.stringify({ torrent: torrentPayload }))
+                        const mp = buildMultipart(
+                            { formData: JSON.stringify({ torrent: torrentPayload }) },
+                            { name: 'file', filename: 'torrent.torrent', data: torrentBytes, contentType: 'application/x-bittorrent' }
+                        )
                         nativeRes = await clientFetch(config, `${config.url}/Api/Torrents/UploadFile`, {
                             method : 'POST',
-                            body   : form,
-                            headers: authH,
+                            body   : mp.body,
+                            headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
                         })
                     } else {
                         throw new Error('Données du torrent indisponibles')
@@ -513,11 +514,20 @@ const RDTClient: TorrentClientDriver = {
                         headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
                     })
                 } else if (torrentBytes) {
-                    const form = new FormData()
-                    if (config.category) form.append('category', String(config.category))
-                    if (config.savePath)  form.append('savepath', String(config.savePath))
-                    form.append('torrents', new Blob([torrentBytes], { type: 'application/x-bittorrent' }), 'torrent.torrent')
-                    res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, { method: 'POST', body: form, headers: authH })
+                    const fields: Record<string, string> = {}
+                    if (config.category) fields.category = String(config.category)
+                    if (config.savePath)  fields.savepath = String(config.savePath)
+                    const mp = buildMultipart(fields, {
+                        name: 'torrents',
+                        filename: 'torrent.torrent',
+                        data: torrentBytes,
+                        contentType: 'application/x-bittorrent',
+                    })
+                    res = await clientFetch(config, `${config.url}/api/v2/torrents/add`, {
+                        method : 'POST',
+                        body   : mp.body,
+                        headers: { ...authH, 'Content-Type': mp.contentType, 'Content-Length': String(mp.body.length) },
+                    })
                 } else {
                     throw new Error('Données du torrent indisponibles')
                 }
