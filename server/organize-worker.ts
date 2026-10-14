@@ -833,13 +833,25 @@ parentPort?.on('message', async (msg: any) => {
         const { torrent, serieData } = found
         const seasonFilter = torrent._season?.season_number
         const fileMap      = buildFileMap(serieData, effectiveHash, nfoSupport, seasonFilter)
-        const orgHash      = organized[effectiveHash] ?? {}
+        const orgHash      = organized[effectiveHash] ?? organized[t.hash] ?? organized[t.hash?.toLowerCase()] ?? {}
         const allDone      = fileMap.size > 0
             ? [...fileMap.values()].every(f => orgHash[String(f.episode_id)])
             : Object.keys(orgHash).length > 0
 
         if (allDone) {
             debug(`« ${t.name} » déjà entièrement importé`)
+            parentPort?.postMessage({
+                type: 'result',
+                hash: effectiveHash,
+                torrentHash: t.hash,
+                name: t.name,
+                serieId: serieData.id ?? null,
+                total: fileMap.size,
+                done: 0,
+                skipped: fileMap.size,
+                errors: [],
+                allDone: true,
+            })
             continue
         }
 
@@ -863,9 +875,28 @@ parentPort?.on('message', async (msg: any) => {
             }
 
             const result = await organizeTorrent(effectiveHash, t.name, t.save_path, seriesData, completedFileNames)
-            parentPort?.postMessage({ type: 'result', hash: effectiveHash, name: t.name, serieId: serieData.id ?? null, ...result })
+
+            let updatedOrgHash: Record<string, any> = {}
+            try {
+                const reRead = readOrganized() as Organized
+                updatedOrgHash = reRead[effectiveHash] ?? reRead[t.hash] ?? reRead[t.hash?.toLowerCase()] ?? {}
+            } catch {}
+
+            const isNowAllDone = fileMap.size > 0
+                ? [...fileMap.values()].every(f => updatedOrgHash[String(f.episode_id)])
+                : (result.done > 0 && result.errors.length === 0)
+
+            parentPort?.postMessage({
+                type: 'result',
+                hash: effectiveHash,
+                torrentHash: t.hash,
+                name: t.name,
+                serieId: serieData.id ?? null,
+                ...result,
+                allDone: isNowAllDone,
+            })
         } catch (err) {
-            error(`Échec de l'import de « ${t.name} » :${err instanceof Error ? err.message : err}`)
+            error(`Échec de l'import de « ${t.name} » : ${err instanceof Error ? err.message : err}`)
         }
     }
 

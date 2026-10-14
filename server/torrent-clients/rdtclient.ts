@@ -598,12 +598,21 @@ const RDTClient: TorrentClientDriver = {
 
     async remove(config, hash, deleteFiles = false) {
         const authH = await rdtAuth(config)
-        const params = new URLSearchParams({ hashes: hash, deleteFiles: deleteFiles ? 'true' : 'false' })
-        const res = await clientFetch(config, `${config.url}/api/v2/torrents/delete`, {
-            method : 'POST',
-            body   : params,
-            headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
-        })
+        const sendDelete = async (h: string) => {
+            const params = new URLSearchParams({ hashes: h, deleteFiles: deleteFiles ? 'true' : 'false' })
+            return clientFetch(config, `${config.url}/api/v2/torrents/delete`, {
+                method : 'POST',
+                body   : params,
+                headers: { ...authH, 'Content-Type': 'application/x-www-form-urlencoded' },
+            })
+        }
+        let res = await sendDelete(hash)
+        if (!res.ok && hash.toLowerCase() !== hash) {
+            res = await sendDelete(hash.toLowerCase())
+        }
+        if (!res.ok && hash.toUpperCase() !== hash) {
+            res = await sendDelete(hash.toUpperCase())
+        }
         if (!res.ok) throw new Error(`Échec de la suppression (HTTP ${res.status})`)
         logger.info('rdtclient', `Torrent ${hash.slice(0, 8)}… supprimé${deleteFiles ? ' (avec fichiers)' : ''}`)
     },

@@ -16,7 +16,7 @@ import rtorrentDriver     from './torrent-clients/rtorrent.js'
 import realDebridDriver   from './torrent-clients/real-debrid.js'
 import delugeDriver       from './torrent-clients/deluge.js'
 import rdtclientDriver    from './torrent-clients/rdtclient.js'
-import { autoOrganizeAll, scanMediaPath, syncFilenameChanges, migrateOrganizedEpisodeIds, dedupeOrganizedEpisodes } from './organize.js'
+import { autoOrganizeAll, scanMediaPath, syncFilenameChanges, migrateOrganizedEpisodeIds, dedupeOrganizedEpisodes, recordRemovalFailure, recordRemovalSuccess } from './organize.js'
 import { logger } from './logger.js'
 import { DATA_DIR, BASE_DIR } from './config.js'
 import { readAvailable, readInfohashMap } from './lib/github-cache.js'
@@ -200,7 +200,7 @@ server.listen(PORT, async () => {
                         pushNotif({ ...result, at: new Date().toISOString() })
                     }
                     // Demandes actives passées en « disponible » dès qu'un fichier est importé
-                    if (result.done > 0 && result.serieId != null) {
+                    if ((result.done > 0 || (result as any).allDone) && result.serieId != null) {
                         try {
                             const toComplete = readRequests().filter(r =>
                                 r.serieId === result.serieId &&
@@ -215,11 +215,17 @@ server.listen(PORT, async () => {
                         }
                     }
                     const { organizeMode, deleteTorrentOnMove } = readSettings()
-                    if (organizeMode === 'move' && deleteTorrentOnMove && result.done > 0) {
-                        const removeResult = await dispatchRemove(result.hash, false)
+                    const isFullyDone = (result as any).allDone || (result.done > 0 && result.errors === 0)
+                    if (organizeMode === 'move' && deleteTorrentOnMove && isFullyDone) {
+                        const targetHash = (result as any).torrentHash || result.hash
+                        const removeResult = await dispatchRemove(targetHash, false, result.hash)
                         if (removeResult.ok) {
+                            recordRemovalSuccess(targetHash)
+                            if (result.hash) recordRemovalSuccess(result.hash)
                             logger.info('api', `Torrent « ${result.name} » retiré du client après déplacement`)
                         } else {
+                            recordRemovalFailure(targetHash)
+                            if (result.hash) recordRemovalFailure(result.hash)
                             logger.warn('api', `Échec du retrait de « ${result.name} » après déplacement : ${removeResult.error ?? 'aucun client n\'a pu le supprimer'}`)
                         }
                     }

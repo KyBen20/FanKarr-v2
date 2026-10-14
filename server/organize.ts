@@ -8,6 +8,17 @@ import { readOrganized, writeOrganized, updateOrganized, retargetEntries, type O
 
 export let workerRunning = false
 const _prevStates = new Map<string, string>()
+const _failedRemovals = new Map<string, number>()
+
+export function recordRemovalFailure(hash: string) {
+    if (hash) _failedRemovals.set(hash.toLowerCase(), Date.now())
+}
+export function recordRemovalSuccess(hash: string) {
+    if (hash) {
+        _failedRemovals.delete(hash.toLowerCase())
+        _failedRemovals.delete(hash)
+    }
+}
 
 function resolveWorkerPath(): string {
     if (typeof (globalThis as any).Bun !== 'undefined') {
@@ -24,7 +35,17 @@ export interface OrganizeResult {
     errors  : { file: string; error: string }[]
 }
 
-type WorkerResult = { hash: string; name: string; serieId?: number | null; total: number; done: number; skipped: number; errors: { file: string; error: string }[] }
+type WorkerResult = {
+    hash: string
+    torrentHash?: string
+    name: string
+    serieId?: number | null
+    total: number
+    done: number
+    skipped: number
+    errors: { file: string; error: string }[]
+    allDone?: boolean
+}
 
 // ── File d'attente des workers ────────────────────────────────
 let _queue: Promise<unknown> = Promise.resolve()
@@ -290,7 +311,7 @@ export async function scanMediaPath(
 export async function autoOrganizeAll(
     listFn     : () => Promise<any[]>,
     seriesData : any[],
-    onResult  ?: (r: { hash: string; name: string; serieId?: number | null; done: number; skipped: number; errors: number; errorFiles: { file: string; error: string }[] }) => void
+    onResult  ?: (r: { hash: string; torrentHash?: string; name: string; serieId?: number | null; done: number; skipped: number; errors: number; errorFiles: { file: string; error: string }[]; allDone?: boolean }) => void
 ): Promise<void> {
     const { autoImport, mediaPath } = readSettings()
     if (!autoImport) {
@@ -338,11 +359,22 @@ export async function autoOrganizeAll(
         return
     }
 
-    const hasUnorganized = torrents.some(t =>
-        isFinished(t) && !organized[t.hash?.toLowerCase()]
-    )
+    const { organizeMode, deleteTorrentOnMove } = readSettings()
 
-    if (!isFirstRun && newlySeeding.length === 0 && !hasUnorganized) return
+    const hasPendingTorrents = torrents.some(t => {
+        if (!isFinished(t)) return false
+        const h = t.hash?.toLowerCase()
+        const org = organized[h] ?? (t.hash ? organized[t.hash] : undefined)
+        if (!org) return true
+        if (organizeMode === 'move' && deleteTorrentOnMove) {
+            const lastFail = _failedRemovals.get(h) ?? (t.hash ? _failedRemovals.get(t.hash) : undefined)
+            if (lastFail && Date.now() - lastFail < 60_000) return false
+            return true
+        }
+        return false
+    })
+
+    if (!isFirstRun && newlySeeding.length === 0 && !hasPendingTorrents) return
     if (seedingCount === 0) return
 
     if (newlySeeding.length > 0 && !isFirstRun) {
@@ -367,13 +399,15 @@ export async function autoOrganizeAll(
                 logger.debug('organize', `« ${msg.name} » : rien à importer (${msg.skipped} ignoré(s))`)
             }
             onResult?.({
-                hash      : msg.hash,
-                name      : msg.name,
-                serieId   : msg.serieId ?? null,
-                done      : msg.done,
-                skipped   : msg.skipped,
-                errors    : msg.errors.length,
-                errorFiles: msg.errors,
+                hash       : msg.hash,
+                torrentHash: msg.torrentHash,
+                name       : msg.name,
+                serieId    : msg.serieId ?? null,
+                done       : msg.done,
+                skipped    : msg.skipped,
+                errors     : msg.errors.length,
+                errorFiles : msg.errors,
+                allDone    : msg.allDone,
             })
         }))
         logger.debug('organize', 'Worker d\'import terminé')

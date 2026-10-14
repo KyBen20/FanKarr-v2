@@ -4,7 +4,7 @@ import { logger } from '../logger.js'
 import { organizeTorrent, migrateOrganizedEpisodeIds } from '../organize.js'
 import { loadCatalog } from '../lib/serie-helpers.js'
 import { recentOrganized, pushNotif, clearNotifs } from '../lib/notifs.js'
-import { dispatchGetFiles } from '../torrent-clients/index.js'
+import { dispatchGetFiles, dispatchRemove } from '../torrent-clients/index.js'
 import { AUTO_IMPORT_INTERVAL_MS, autoImportSchedule } from '../lib/schedule.js'
 import { readSettings } from '../settings.js'
 import { DATA_DIR } from '../config.js'
@@ -51,7 +51,18 @@ router.post('/organize', requireAuth, async (req, res) => {
         if (result.done > 0 || result.errors.length > 0) {
             pushNotif({ hash, name, serieId: result.serieId ?? null, done: result.done, skipped: result.skipped, errors: result.errors.length, errorFiles: result.errors, at: new Date().toISOString() })
         }
-        res.json(result)
+
+        const { organizeMode, deleteTorrentOnMove } = readSettings()
+        let removed = false
+        if (organizeMode === 'move' && deleteTorrentOnMove && result.errors.length === 0) {
+            const removeResult = await dispatchRemove(hash, false).catch(() => ({ ok: false }))
+            if (removeResult.ok) {
+                removed = true
+                logger.info('api', `Torrent « ${name} » retiré du client après déplacement manuel`)
+            }
+        }
+
+        res.json({ ...result, removed })
     } catch (err) {
         logger.error('api', `Échec de l'import manuel de « ${name} » : ${err instanceof Error ? err.message : err}`)
         res.status(500).json({ error: err instanceof Error ? err.message : 'Erreur inattendue, consultez les journaux' })

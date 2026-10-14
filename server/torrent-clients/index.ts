@@ -384,20 +384,28 @@ export async function dispatchDownload(url: string, options?: DownloadOptions): 
 
 // ─── Suppression ──────────────────────────────────────────────────────────────
 
-export async function dispatchRemove(hash: string, deleteFiles = false): Promise<{ ok: boolean; error?: string }> {
+export async function dispatchRemove(hash: string, deleteFiles = false, altHash?: string): Promise<{ ok: boolean; error?: string }> {
     const clients = loadClients()
     let found = false
+    const hashesToTry = [hash]
+    if (altHash && altHash.toLowerCase() !== hash.toLowerCase()) {
+        hashesToTry.push(altHash)
+    }
     for (const client of clients) {
         const driver = getDriver(client.type)
         if (!driver) continue
-        try {
-            await driver.remove(client.config, hash, deleteFiles)
-            logger.info('torrent-clients', `Torrent ${hash.slice(0, 8)}… supprimé de « ${client.name} »${deleteFiles ? ' (avec fichiers)' : ''}`)
-            untrackManagedHash(client.uuid, hash)
-            found = true
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : 'Erreur inattendue, consultez les journaux'
-            logger.warn('torrent-clients', `Impossible de supprimer le torrent de « ${client.name} » : ${msg}`)
+        for (const h of hashesToTry) {
+            try {
+                await driver.remove(client.config, h, deleteFiles)
+                logger.info('torrent-clients', `Torrent ${h.slice(0, 8)}… supprimé de « ${client.name} »${deleteFiles ? ' (avec fichiers)' : ''}`)
+                untrackManagedHash(client.uuid, h)
+                if (altHash) untrackManagedHash(client.uuid, altHash)
+                found = true
+                break
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : 'Erreur inattendue, consultez les journaux'
+                logger.warn('torrent-clients', `Impossible de supprimer le torrent (${h.slice(0, 8)}…) de « ${client.name} » : ${msg}`)
+            }
         }
     }
     return found ? { ok: true } : { ok: false, error: 'Torrent introuvable dans les clients torrent' }

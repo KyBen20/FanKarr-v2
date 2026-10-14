@@ -38,9 +38,10 @@ router.post('/download', requireAuth, async (req, res) => {
 router.delete('/torrent/:hash', requireAuth, async (req, res) => {
     const hash        = String(req.params.hash)
     const deleteFiles = req.query.deleteFiles === 'true'
+    const altHash     = req.query.altHash ? String(req.query.altHash) : undefined
     if (!hash) { res.status(400).json({ error: 'Hash du torrent requis' }); return }
     try {
-        const result = await dispatchRemove(hash, deleteFiles)
+        const result = await dispatchRemove(hash, deleteFiles, altHash)
         res.json(result)
     } catch (err) {
         logger.error('api', `Échec de la suppression du torrent : ${err instanceof Error ? err.message : err}`)
@@ -56,31 +57,52 @@ router.get('/downloads', requireAuth, async (_req, res) => {
         let organized: Record<string, Record<string, any>> = {}
         try { const p = path.join(DATA_DIR, 'organized.json'); if (fs.existsSync(p)) organized = JSON.parse(fs.readFileSync(p, 'utf-8')) } catch {}
         const enriched = await Promise.all(torrents.map(async (t: any) => {
-            const orgFiles = organized[t.hash] ?? {}
             let totalFiles = 1
             let serieName: string | undefined
             let serieId: number | undefined
             let episodes: any[] = []
+            let matchedInfohash: string | undefined
             try {
                 const availableIds = await readAvailable()
                 for (const id of availableIds) {
                     const sd = await readSerieData(id)
                     if (!sd) continue
-                    const match = extractTorrentsFromSerieData(sd).find((st: any) => st.infohash?.toLowerCase() === t.hash?.toLowerCase())
+                    const match = extractTorrentsFromSerieData(sd).find((st: any) =>
+                        (st.infohash && t.hash && st.infohash.toLowerCase() === t.hash.toLowerCase()) ||
+                        (t.name && st.title && st.title.toLowerCase().trim() === t.name.toLowerCase().trim())
+                    )
                     if (match) {
                         const resolved = buildResolvedEpisodes(sd, match.infohash, match.season_number)
                         totalFiles = resolved.length || 1
                         serieName  = sd.title ?? sd.show_title
                         serieId    = sd.id
                         episodes   = resolved
+                        matchedInfohash = match.infohash
                         break
                     }
                 }
             } catch {}
+
+            const hashCandidates = [
+                t.hash,
+                t.hash?.toLowerCase(),
+                t.hash?.toUpperCase(),
+                matchedInfohash,
+                matchedInfohash?.toLowerCase(),
+            ].filter(Boolean) as string[]
+
+            let orgFiles: Record<string, any> = {}
+            for (const hc of hashCandidates) {
+                if (organized[hc]) {
+                    orgFiles = organized[hc]
+                    break
+                }
+            }
+
             const doneFiles = Object.keys(orgFiles).length
             const organizeState: 'none' | 'partial' | 'done' = doneFiles >= totalFiles ? 'done' : doneFiles > 0 ? 'partial' : 'none'
-            const notif    = recentOrganized.find(n => n.hash === t.hash)
-            const imported = recentOrganized.find(n => n.hash === t.hash && n.done > 0)
+            const notif    = recentOrganized.find(n => hashCandidates.includes(n.hash))
+            const imported = recentOrganized.find(n => hashCandidates.includes(n.hash) && n.done > 0)
             return { ...t, organizeState, organizeProgress: { done: doneFiles, total: totalFiles }, errorFiles: notif?.errorFiles ?? [], importedAt: imported?.at ?? null, serieId, serieName, episodes }
         }))
         res.json(enriched)

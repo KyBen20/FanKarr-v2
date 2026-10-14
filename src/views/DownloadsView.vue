@@ -11,6 +11,17 @@
           </span>
         </div>
         <div class="flex items-center gap-2.5">
+          <button
+            v-if="importedCount > 0"
+            @click="clearImported"
+            :disabled="clearingImported"
+            class="btn-secondary pointer-fine:h-[38px]"
+            title="Retirer du client les torrents terminés et déjà importés"
+          >
+            <Loader v-if="clearingImported" :size="15" class="animate-spin" />
+            <Trash2 v-else :size="15" :stroke-width="2" class="text-muted" />
+            Nettoyer les importés · {{ importedCount }}
+          </button>
           <button @click="importAll" :disabled="importingAll || toImportCount === 0" class="btn-primary pointer-fine:h-[38px]">
             <Loader v-if="importingAll" :size="15" class="animate-spin" />
             <Upload v-else :size="15" :stroke-width="2.25" />
@@ -82,7 +93,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { RouterLink } from 'vue-router'
-import { Loader, Pause, Play, RefreshCw, Upload } from 'lucide-vue-next'
+import { Loader, Pause, Play, RefreshCw, Upload, Trash2 } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useSeriesStore } from '@/stores/series'
 import { plural } from '@/utils/format'
@@ -98,6 +109,7 @@ const polling         = ref(true)
 const noClients       = ref(false)
 const importing       = ref<Record<string, boolean>>({})
 const importingAll    = ref(false)
+const clearingImported = ref(false)
 const confirmDelete   = ref<string | null>(null)
 const deleting        = ref<Record<string, boolean>>({})
 const activeTab       = ref<string>('all')
@@ -152,6 +164,8 @@ const tabs = computed<ActivityTab[]>(() => [
 ])
 
 const toImportCount = computed(() => torrents.value.filter(isToImport).length)
+const importedTorrents = computed(() => torrents.value.filter(t => isDone(t) && t.organizeState === 'done'))
+const importedCount    = computed(() => importedTorrents.value.length)
 
 const visibleTorrents = computed(() => {
   let list = torrents.value.filter(tabPredicates[activeTab.value] ?? tabPredicates.all!)
@@ -233,6 +247,22 @@ function stopPolling()  { if (pollInterval) { clearInterval(pollInterval); pollI
 function togglePolling() { polling.value = !polling.value; polling.value ? startPolling() : stopPolling() }
 
 // ── Actions ──
+async function clearImported() {
+  const toDelete = importedTorrents.value
+  if (toDelete.length === 0) return
+  clearingImported.value = true
+  let done = 0
+  for (const t of toDelete) {
+    try {
+      const res = await fetch(`/api/torrent/${t.hash}?deleteFiles=false`, { method: 'DELETE', credentials: 'include' })
+      if (res.ok) done++
+    } catch {}
+  }
+  clearingImported.value = false
+  await fetchTorrents()
+  toast(plural(done, 'torrent retiré', 'torrents retirés'), 'success')
+}
+
 async function importTorrent(torrent: any) {
   importing.value[torrent.hash] = true
   try {
@@ -240,8 +270,14 @@ async function importTorrent(torrent: any) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
       body: JSON.stringify({ hash: torrent.hash, save_path: torrent.save_path, name: torrent.name }),
     })
-    if (res.ok) { toast(`« ${torrent.name} » importé`, 'success'); await fetchTorrents() }
-    else { const { error } = await res.json(); toast(error ?? `Impossible d'importer « ${torrent.name} »`, 'error') }
+    if (res.ok) {
+      const data = await res.json()
+      toast(data.removed ? `« ${torrent.name} » importé et retiré du client` : `« ${torrent.name} » importé`, 'success')
+      await fetchTorrents()
+    } else {
+      const { error } = await res.json()
+      toast(error ?? `Impossible d'importer « ${torrent.name} »`, 'error')
+    }
   } catch { toast('Impossible de contacter le serveur', 'error') }
   finally { importing.value[torrent.hash] = false }
 }
